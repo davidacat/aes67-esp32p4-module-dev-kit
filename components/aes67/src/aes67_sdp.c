@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <inttypes.h>
 
 #include "esp_log.h"
 
@@ -98,12 +99,12 @@ int aes67_sdp_generate(const aes67_sdp_t *sdp, char *buf, size_t buf_len)
 
     int written = snprintf(buf, buf_len,
         "v=0\r\n"
-        "o=%s %u %u IN IP4 %s\r\n"
+        "o=%s %" PRIu32 " %" PRIu32 " IN IP4 %s\r\n"
         "s=%s\r\n"
         "c=IN IP4 %s/%u\r\n"
         "t=0 0\r\n"
         "m=audio %u RTP/AVP %u\r\n"
-        "a=rtpmap:%u %s/%u/%u\r\n"
+        "a=rtpmap:%u %s/%" PRIu32 "/%u\r\n"
         "a=ptime:%s\r\n",
         username, sdp->session_id, sdp->session_version, origin_ip_str,
         sdp->session_name,
@@ -131,7 +132,7 @@ int aes67_sdp_generate(const aes67_sdp_t *sdp, char *buf, size_t buf_len)
     /* Append media clock attribute */
     if (sdp->has_mediaclk) {
         int n = snprintf(buf + written, buf_len - written,
-                         "a=mediaclk:direct=%u\r\n",
+                         "a=mediaclk:direct=%" PRIu32 "\r\n",
                          sdp->mediaclk_offset);
         if (n < 0 || (size_t)(written + n) >= buf_len) {
             return -1;

@@ -30,32 +30,9 @@ static const char *TAG = "aes67_ptp";
 #define PTP_MONITOR_PRIORITY        5
 #define PTP_INTERFACE_NAME          "ETH_DEF"
 
-/* -------------------------------------------------------------------
- * Forward declarations for ptpd component (local ESP-IDF component).
- * We declare these here to avoid hard header dependencies.
- * ------------------------------------------------------------------- */
-struct ptpd_status_s {
-    char clock_source_id[32];
-    int64_t last_sync_offset_ns;
-    int64_t mean_path_delay_ns;
-    double drift;
-};
-
-extern int ptpd_start(const char *interface);
-extern int ptpd_status(int pid, struct ptpd_status_s *status);
-extern int ptpd_stop(int pid);
-
-/* -------------------------------------------------------------------
- * Forward declarations for esp_eth_time (local component).
- * ------------------------------------------------------------------- */
-#define CLOCK_PTP_SYSTEM ((clockid_t)19)
-
-typedef struct {
-    esp_eth_handle_t eth_hndl;
-} esp_eth_clock_cfg_t;
-
-extern int esp_eth_clock_gettime(clockid_t clock_id, struct timespec *tp);
-extern esp_err_t esp_eth_clock_init(clockid_t clock_id, esp_eth_clock_cfg_t *cfg);
+/* PTP daemon and clock APIs from local components */
+#include "ptpd.h"
+#include "esp_eth_time.h"
 
 /* -------------------------------------------------------------------
  * Internal context
@@ -142,23 +119,6 @@ static bool ptp_update_lock_state(struct aes67_ptp_ctx *ctx, int64_t offset_ns)
     return (ctx->lock_state != prev);
 }
 
-/*
- * Parse a PTP clock identity string (e.g. "001a2b3c4d5e6f70") into
- * the 8-byte grandmaster_id field. Best-effort; zeros out on failure.
- */
-static void ptp_parse_clock_id(const char *id_str, uint8_t gm_id[8])
-{
-    memset(gm_id, 0, 8);
-    if (!id_str || strlen(id_str) < 16) {
-        return;
-    }
-
-    for (int i = 0; i < 8; i++) {
-        char hex[3] = { id_str[i * 2], id_str[i * 2 + 1], '\0' };
-        gm_id[i] = (uint8_t)strtoul(hex, NULL, 16);
-    }
-}
-
 /* -------------------------------------------------------------------
  * Monitor task
  * ------------------------------------------------------------------- */
@@ -185,21 +145,18 @@ static void ptp_monitor_task(void *arg)
         }
 
         /* Cache latest offset and path delay */
-        ctx->offset_ns = (int32_t)status.last_sync_offset_ns;
-        ctx->path_delay_ns = (int32_t)status.mean_path_delay_ns;
+        ctx->offset_ns = (int32_t)status.last_delta_ns;
+        ctx->path_delay_ns = (int32_t)status.path_delay_ns;
 
-        /* Extract grandmaster identity */
-        ptp_parse_clock_id(status.clock_source_id, ctx->grandmaster_id);
+        /* Extract grandmaster identity from status struct */
+        memcpy(ctx->grandmaster_id, status.clock_source_info.gm_id, 8);
 
         /* Detect if we are the grandmaster. When acting as GM, the ptpd daemon
-         * will report zero offset and the clock_source_id will match our own
-         * EUI-64 (MAC with FF:FE insert) or be empty. */
-        bool all_zeros = true;
-        for (int i = 0; i < 8; i++) {
-            if (ctx->grandmaster_id[i] != 0) { all_zeros = false; break; }
-        }
-
-        if (all_zeros || (
+         * will report no valid clock source, or the GM ID will match our own
+         * EUI-64 (MAC with FF:FE inserted in the middle). */
+        bool is_self_gm = !status.clock_source_valid;
+        if (!is_self_gm) {
+            is_self_gm = (
             ctx->grandmaster_id[0] == ctx->own_mac[0] &&
             ctx->grandmaster_id[1] == ctx->own_mac[1] &&
             ctx->grandmaster_id[2] == ctx->own_mac[2] &&
@@ -207,7 +164,10 @@ static void ptp_monitor_task(void *arg)
             ctx->grandmaster_id[4] == 0xFE &&
             ctx->grandmaster_id[5] == ctx->own_mac[3] &&
             ctx->grandmaster_id[6] == ctx->own_mac[4] &&
-            ctx->grandmaster_id[7] == ctx->own_mac[5])) {
+            ctx->grandmaster_id[7] == ctx->own_mac[5]);
+        }
+
+        if (is_self_gm) {
 
             if (!ctx->is_grandmaster) {
                 ctx->is_grandmaster = true;
@@ -231,7 +191,7 @@ static void ptp_monitor_task(void *arg)
             }
 
             /* Run lock state machine for slave mode */
-            bool changed = ptp_update_lock_state(ctx, status.last_sync_offset_ns);
+            bool changed = ptp_update_lock_state(ctx, status.last_delta_ns);
             if (changed && ctx->lock_cb) {
                 ctx->lock_cb(ctx->lock_state, ctx->lock_cb_user_data);
             }

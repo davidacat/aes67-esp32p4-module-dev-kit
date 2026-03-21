@@ -22,4 +22,6 @@ idf_component_register(
         mdns
         lwip
         esp_psram
+        ptpd
+        esp_eth_time
 )

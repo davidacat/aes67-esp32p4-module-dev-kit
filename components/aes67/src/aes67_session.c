@@ -7,6 +7,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <arpa/inet.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"

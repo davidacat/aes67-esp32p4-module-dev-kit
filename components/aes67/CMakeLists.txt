@@ -1,0 +1,25 @@
+idf_component_register(
+    SRCS
+        "src/aes67.c"
+        "src/aes67_ptp.c"
+        "src/aes67_rtp.c"
+        "src/aes67_sap.c"
+        "src/aes67_sdp.c"
+        "src/aes67_session.c"
+        "src/aes67_audio.c"
+        "src/aes67_convert.c"
+        "src/aes67_net.c"
+        "src/aes67_mdns.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "private_include"
+    PRIV_REQUIRES
+        esp_eth
+        esp_netif
+        esp_timer
+        esp_driver_i2s
+        mdns
+        lwip
+        esp_psram
+)

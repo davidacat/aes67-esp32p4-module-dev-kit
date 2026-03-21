@@ -1,0 +1,9 @@
+description: "AES67/RAVENNA audio-over-IP component for ESP32-P4"
+version: "0.1.0"
+targets:
+  - esp32p4
+dependencies:
+  idf:
+    version: ">=5.5.0"
+  espressif/mdns:
+    version: ">=1.0.0"

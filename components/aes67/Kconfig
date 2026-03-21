@@ -1,0 +1,182 @@
+menu "AES67 RAVENNA Component"
+
+    config AES67_MAX_SOURCES
+        int "Maximum number of source (TX) streams"
+        default 4
+        range 1 32
+        help
+            Maximum number of simultaneous AES67 source streams.
+
+    config AES67_MAX_SINKS
+        int "Maximum number of sink (RX) streams"
+        default 4
+        range 1 32
+        help
+            Maximum number of simultaneous AES67 sink streams.
+
+    config AES67_MAX_CHANNELS_PER_STREAM
+        int "Maximum channels per stream"
+        default 8
+        range 1 64
+        help
+            Maximum number of audio channels in a single RTP stream.
+
+    config AES67_DEFAULT_SAMPLE_RATE
+        int "Default sample rate (Hz)"
+        default 48000
+        help
+            Default audio sample rate. Common values: 44100, 48000, 96000.
+
+    config AES67_DEFAULT_PACKET_TIME_US
+        int "Default packet time (microseconds)"
+        default 1000
+        range 125 4000
+        help
+            Default packet time in microseconds. AES67 mandates support
+            for 1ms (1000us). Common values: 125, 250, 333, 1000.
+
+    config AES67_DEFAULT_WORD_LENGTH
+        int "Default word length (bytes per sample)"
+        default 3
+        range 2 4
+        help
+            Bytes per audio sample. 2=L16, 3=L24, 4=L32.
+
+    config AES67_RTP_PORT
+        int "Default RTP port"
+        default 5004
+        help
+            Default UDP port for RTP audio streams.
+
+    config AES67_RTP_MCAST_BASE
+        string "RTP multicast base address"
+        default "239.69.0.1"
+        help
+            Base multicast IP address for RTP streams. Each stream
+            gets the next sequential address from this base.
+
+    config AES67_SAP_ENABLED
+        bool "Enable SAP (Session Announcement Protocol)"
+        default y
+        help
+            Enable periodic SAP announcements for source discovery.
+
+    config AES67_MDNS_ENABLED
+        bool "Enable mDNS service advertisement"
+        default y
+        help
+            Advertise AES67 streams via mDNS/DNS-SD using the
+            _ravenna._udp service type.
+
+    config AES67_PTP_DOMAIN
+        int "PTP domain"
+        default 0
+        range 0 127
+        help
+            IEEE 1588 PTP domain number.
+
+    config AES67_PTP_PREFER_GRANDMASTER
+        bool "Prefer becoming PTP grandmaster"
+        default y
+        help
+            When no other grandmaster is found on the network, this device
+            will become PTP grandmaster. If another grandmaster with better
+            clock quality appears, this device will fall back to slave mode
+            according to the Best Master Clock algorithm.
+
+    config AES67_JITTER_BUFFER_MS
+        int "Jitter buffer size (ms)"
+        default 4
+        range 1 50
+        help
+            Sink stream jitter buffer depth in milliseconds.
+            Larger values increase latency but tolerate more network jitter.
+
+    config AES67_USE_PSRAM
+        bool "Use PSRAM for audio buffers"
+        default y
+        depends on SPIRAM
+        help
+            Allocate audio ring buffers and jitter buffers in PSRAM.
+            DMA buffers for I2S remain in internal SRAM.
+
+    config AES67_AUDIO_RING_BUFFER_MS
+        int "Audio ring buffer size (ms)"
+        default 20
+        range 5 100
+        help
+            Size of the audio ring buffer in milliseconds. This buffer
+            sits between I2S and the RTP engine.
+
+    config AES67_TASK_PRIORITY_PTP
+        int "PTP task priority"
+        default 20
+        range 1 25
+        help
+            FreeRTOS priority for the PTP synchronization task.
+
+    config AES67_TASK_PRIORITY_RTP
+        int "RTP task priority"
+        default 19
+        range 1 25
+        help
+            FreeRTOS priority for the RTP packet processing task.
+
+    config AES67_TASK_PRIORITY_AUDIO
+        int "Audio frame task priority"
+        default 22
+        range 1 25
+        help
+            FreeRTOS priority for the audio frame (TIC) processing task.
+
+    config AES67_TASK_PRIORITY_SAP
+        int "SAP task priority"
+        default 5
+        range 1 25
+        help
+            FreeRTOS priority for SAP announcement task.
+
+    config AES67_NODE_NAME
+        string "Default node name"
+        default "esp32p4-aes67"
+        help
+            Default device node name used in SDP and mDNS advertisements.
+
+    config AES67_I2S_PORT
+        int "I2S port number"
+        default 0
+        range 0 2
+        help
+            I2S peripheral port to use for audio I/O.
+
+    config AES67_I2S_MCK_GPIO
+        int "I2S MCLK GPIO"
+        default 13
+        help
+            GPIO pin for I2S master clock output.
+
+    config AES67_I2S_BCK_GPIO
+        int "I2S BCLK GPIO"
+        default 12
+        help
+            GPIO pin for I2S bit clock.
+
+    config AES67_I2S_WS_GPIO
+        int "I2S WS/LRCLK GPIO"
+        default 10
+        help
+            GPIO pin for I2S word select (LRCLK).
+
+    config AES67_I2S_DOUT_GPIO
+        int "I2S data out GPIO"
+        default 11
+        help
+            GPIO pin for I2S serial data output (playback/sink).
+
+    config AES67_I2S_DIN_GPIO
+        int "I2S data in GPIO"
+        default 9
+        help
+            GPIO pin for I2S serial data input (capture/source).
+
+endmenu

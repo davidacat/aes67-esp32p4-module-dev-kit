@@ -1,0 +1,881 @@
+/*
+ * RTP audio streaming engine implementation.
+ *
+ * Manages source (TX) and sink (RX) streams with per-stream ring buffers.
+ * The RX task receives packets and dispatches to sink jitter buffers.
+ * The TX path is driven by the audio frame timer calling process_tx().
+ *
+ * Ring buffers use single-reader/single-writer lock-free design with
+ * volatile read/write positions for safe concurrent access.
+ */
+
+#include "aes67_rtp.h"
+#include "aes67_convert.h"
+#include "aes67_net.h"
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static const char *TAG = "aes67_rtp";
+
+#define AES67_RTP_VERSION       2
+#define AES67_RTP_HEADER_SIZE   12
+#define AES67_MAX_STREAMS       (CONFIG_AES67_MAX_SOURCES + CONFIG_AES67_MAX_SINKS)
+#define AES67_RX_TASK_STACK     4096
+#define AES67_RX_BUF_SIZE       2048
+#define AES67_JITTER_BUF_MULT   4
+
+/* Ring buffer for audio data. Single reader, single writer. */
+typedef struct {
+    uint8_t *data;
+    uint32_t size;              /* Total buffer size in bytes */
+    volatile uint32_t write_pos;
+    volatile uint32_t read_pos;
+} aes67_ringbuf_t;
+
+/* Internal stream structure */
+struct aes67_rtp_stream {
+    aes67_rtp_stream_config_t config;
+    aes67_stream_dir_t direction;
+    int tx_sock;
+    struct sockaddr_in dest_addr;
+    uint16_t seq_num;
+    uint32_t ssrc;
+    aes67_rtp_stream_status_t status;
+    aes67_ringbuf_t ring;
+    uint32_t samples_per_packet;
+    uint32_t packet_payload_size;
+    uint8_t *tx_packet_buf;     /* Scratch buffer for packet assembly (internal SRAM) */
+    bool active;
+    bool first_packet;          /* True until first RTP packet received (sinks) */
+};
+
+/* Internal engine structure */
+struct aes67_rtp_engine {
+    struct aes67_rtp_stream *streams[AES67_MAX_STREAMS];
+    int stream_count;
+    int rx_sock;
+    TaskHandle_t rx_task;
+    bool running;
+    bool use_psram;
+    aes67_net_config_t net_config;
+};
+
+/* --- Ring buffer helpers --- */
+
+/* Available bytes to read */
+static inline uint32_t ringbuf_available(const aes67_ringbuf_t *rb)
+{
+    uint32_t wp = rb->write_pos;
+    uint32_t rp = rb->read_pos;
+    if (wp >= rp) {
+        return wp - rp;
+    }
+    return rb->size - rp + wp;
+}
+
+/* Free space available for writing */
+static inline uint32_t ringbuf_free(const aes67_ringbuf_t *rb)
+{
+    /* Reserve one byte to distinguish full from empty */
+    uint32_t avail = ringbuf_available(rb);
+    return rb->size - 1 - avail;
+}
+
+/* Write data into ring buffer. Returns bytes actually written. */
+static uint32_t ringbuf_write(aes67_ringbuf_t *rb, const uint8_t *data, uint32_t len)
+{
+    uint32_t free_bytes = ringbuf_free(rb);
+    if (len > free_bytes) {
+        len = free_bytes;
+    }
+    if (len == 0) {
+        return 0;
+    }
+
+    uint32_t wp = rb->write_pos;
+    uint32_t first = rb->size - wp;
+    if (first >= len) {
+        memcpy(rb->data + wp, data, len);
+    } else {
+        memcpy(rb->data + wp, data, first);
+        memcpy(rb->data, data + first, len - first);
+    }
+
+    /* Atomic update of write position */
+    rb->write_pos = (wp + len) % rb->size;
+    return len;
+}
+
+/* Read data from ring buffer. Returns bytes actually read. */
+static uint32_t ringbuf_read(aes67_ringbuf_t *rb, uint8_t *data, uint32_t len)
+{
+    uint32_t avail = ringbuf_available(rb);
+    if (len > avail) {
+        len = avail;
+    }
+    if (len == 0) {
+        return 0;
+    }
+
+    uint32_t rp = rb->read_pos;
+    uint32_t first = rb->size - rp;
+    if (first >= len) {
+        memcpy(data, rb->data + rp, len);
+    } else {
+        memcpy(data, rb->data + rp, first);
+        memcpy(data + first, rb->data, len - first);
+    }
+
+    /* Atomic update of read position */
+    rb->read_pos = (rp + len) % rb->size;
+    return len;
+}
+
+/* --- RTP header construction/parsing --- */
+
+static void rtp_build_header(uint8_t *buf, uint8_t pt, uint16_t seq,
+                             uint32_t timestamp, uint32_t ssrc)
+{
+    buf[0] = (AES67_RTP_VERSION << 6); /* V=2, no padding, no extension, CC=0 */
+    buf[1] = pt & 0x7F;                /* No marker bit */
+    buf[2] = (seq >> 8) & 0xFF;
+    buf[3] = seq & 0xFF;
+    buf[4] = (timestamp >> 24) & 0xFF;
+    buf[5] = (timestamp >> 16) & 0xFF;
+    buf[6] = (timestamp >> 8) & 0xFF;
+    buf[7] = timestamp & 0xFF;
+    buf[8] = (ssrc >> 24) & 0xFF;
+    buf[9] = (ssrc >> 16) & 0xFF;
+    buf[10] = (ssrc >> 8) & 0xFF;
+    buf[11] = ssrc & 0xFF;
+}
+
+static bool rtp_parse_header(const uint8_t *buf, size_t len,
+                             aes67_rtp_header_t *hdr)
+{
+    if (len < AES67_RTP_HEADER_SIZE) {
+        return false;
+    }
+
+    uint8_t version = (buf[0] >> 6) & 0x03;
+    if (version != AES67_RTP_VERSION) {
+        return false;
+    }
+
+    hdr->flags = buf[0];
+    hdr->pt = buf[1] & 0x7F;
+    hdr->seq = (uint16_t)(buf[2] << 8) | buf[3];
+    hdr->timestamp = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) |
+                     ((uint32_t)buf[6] << 8) | buf[7];
+    hdr->ssrc = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
+                ((uint32_t)buf[10] << 8) | buf[11];
+    return true;
+}
+
+/* --- Stream allocation helpers --- */
+
+static uint32_t compute_samples_per_packet(uint32_t sample_rate,
+                                           uint16_t packet_time_us)
+{
+    return (sample_rate * (uint32_t)packet_time_us) / 1000000;
+}
+
+static esp_err_t stream_alloc_buffers(struct aes67_rtp_stream *stream,
+                                      bool use_psram)
+{
+    uint32_t frame_size = stream->config.channels * stream->config.word_length;
+    uint32_t packet_bytes = stream->samples_per_packet * frame_size;
+    uint32_t buf_size;
+
+    if (stream->direction == AES67_STREAM_SINK) {
+        /* Jitter buffer: 4x packet size for network jitter tolerance */
+        buf_size = packet_bytes * AES67_JITTER_BUF_MULT;
+    } else {
+        /* Source TX buffer: 4x packet size for buffering */
+        buf_size = packet_bytes * AES67_JITTER_BUF_MULT;
+    }
+
+    /* Add 1 byte for ring buffer full/empty distinction */
+    buf_size += 1;
+
+    uint32_t caps = use_psram ? MALLOC_CAP_SPIRAM : MALLOC_CAP_DEFAULT;
+    stream->ring.data = heap_caps_malloc(buf_size, caps);
+    if (!stream->ring.data) {
+        ESP_LOGE(TAG, "Failed to allocate ring buffer (%lu bytes)", (unsigned long)buf_size);
+        return ESP_ERR_NO_MEM;
+    }
+    memset(stream->ring.data, 0, buf_size);
+    stream->ring.size = buf_size;
+    stream->ring.write_pos = 0;
+    stream->ring.read_pos = 0;
+
+    /* TX packet scratch buffer always in internal SRAM for DMA access */
+    if (stream->direction == AES67_STREAM_SOURCE) {
+        uint32_t pkt_size = AES67_RTP_HEADER_SIZE + stream->packet_payload_size;
+        stream->tx_packet_buf = heap_caps_malloc(pkt_size,
+                                                 MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        if (!stream->tx_packet_buf) {
+            ESP_LOGE(TAG, "Failed to allocate TX packet buffer (%lu bytes)",
+                     (unsigned long)pkt_size);
+            heap_caps_free(stream->ring.data);
+            stream->ring.data = NULL;
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    return ESP_OK;
+}
+
+static void stream_free_buffers(struct aes67_rtp_stream *stream)
+{
+    if (stream->ring.data) {
+        heap_caps_free(stream->ring.data);
+        stream->ring.data = NULL;
+    }
+    if (stream->tx_packet_buf) {
+        heap_caps_free(stream->tx_packet_buf);
+        stream->tx_packet_buf = NULL;
+    }
+}
+
+/* Find a sink stream matching the incoming packet by SSRC or dest addr */
+static struct aes67_rtp_stream *find_sink_stream(struct aes67_rtp_engine *engine,
+                                                  uint32_t ssrc,
+                                                  const struct sockaddr_in *src_addr)
+{
+    for (int i = 0; i < AES67_MAX_STREAMS; i++) {
+        struct aes67_rtp_stream *s = engine->streams[i];
+        if (!s || s->direction != AES67_STREAM_SINK || !s->active) {
+            continue;
+        }
+
+        /* Match by SSRC first */
+        if (s->ssrc == ssrc) {
+            return s;
+        }
+
+        /* Match by configured source SSRC */
+        if (s->config.ssrc != 0 && s->config.ssrc == ssrc) {
+            s->ssrc = ssrc;
+            return s;
+        }
+    }
+
+    /* If no SSRC match, find a sink that has SSRC=0 (auto-detect mode) */
+    for (int i = 0; i < AES67_MAX_STREAMS; i++) {
+        struct aes67_rtp_stream *s = engine->streams[i];
+        if (!s || s->direction != AES67_STREAM_SINK || !s->active) {
+            continue;
+        }
+        if (s->config.ssrc == 0 && s->first_packet) {
+            /* Lock onto this SSRC */
+            s->ssrc = ssrc;
+            s->first_packet = false;
+            ESP_LOGI(TAG, "Sink stream locked to SSRC 0x%08lx",
+                     (unsigned long)ssrc);
+            return s;
+        }
+    }
+
+    return NULL;
+}
+
+/* --- RX task --- */
+
+static void rx_task_func(void *arg)
+{
+    struct aes67_rtp_engine *engine = (struct aes67_rtp_engine *)arg;
+    uint8_t *rx_buf = heap_caps_malloc(AES67_RX_BUF_SIZE,
+                                       MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!rx_buf) {
+        ESP_LOGE(TAG, "Failed to allocate RX buffer");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* Temporary buffer for converted samples (worst case: 64 channels * max packet) */
+    int32_t *sample_buf = heap_caps_malloc(
+        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 192 * sizeof(int32_t),
+        MALLOC_CAP_INTERNAL);
+    if (!sample_buf) {
+        ESP_LOGE(TAG, "Failed to allocate sample conversion buffer");
+        heap_caps_free(rx_buf);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "RX task started on port %u", engine->net_config.rtp_port);
+
+    while (engine->running) {
+        struct sockaddr_in src_addr;
+        socklen_t addr_len = sizeof(src_addr);
+
+        int recv_len = recvfrom(engine->rx_sock, rx_buf, AES67_RX_BUF_SIZE, 0,
+                                (struct sockaddr *)&src_addr, &addr_len);
+        if (recv_len < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
+            if (!engine->running) {
+                break;
+            }
+            ESP_LOGW(TAG, "recvfrom error: %d (%s)", errno, strerror(errno));
+            continue;
+        }
+
+        if (recv_len < AES67_RTP_HEADER_SIZE) {
+            continue;
+        }
+
+        /* Parse RTP header */
+        aes67_rtp_header_t hdr;
+        if (!rtp_parse_header(rx_buf, recv_len, &hdr)) {
+            continue;
+        }
+
+        /* Find the matching sink stream */
+        struct aes67_rtp_stream *stream = find_sink_stream(engine, hdr.ssrc,
+                                                            &src_addr);
+        if (!stream) {
+            continue;
+        }
+
+        /* Validate payload type */
+        if (hdr.pt != stream->config.payload_type) {
+            stream->status.status_flags |= AES67_RTP_STATUS_PT_ERROR;
+            continue;
+        }
+
+        /* Check sequence continuity */
+        uint16_t expected_seq = stream->status.last_seq + 1;
+        if (stream->status.packets_received > 0 && hdr.seq != expected_seq) {
+            int16_t diff = (int16_t)(hdr.seq - expected_seq);
+            if (diff > 0) {
+                stream->status.packets_lost += diff;
+            }
+            stream->status.seq_errors++;
+            stream->status.status_flags |= AES67_RTP_STATUS_SEQ_ERROR;
+        }
+
+        stream->status.last_seq = hdr.seq;
+        stream->status.last_rtp_timestamp = hdr.timestamp;
+        stream->status.status_flags |= AES67_RTP_STATUS_RECEIVING;
+
+        /* Convert from network byte order to native samples */
+        const uint8_t *payload = rx_buf + AES67_RTP_HEADER_SIZE;
+        uint32_t payload_len = recv_len - AES67_RTP_HEADER_SIZE;
+        uint32_t expected_payload = stream->packet_payload_size;
+
+        if (payload_len < expected_payload) {
+            continue;
+        }
+
+        uint32_t frames = stream->samples_per_packet;
+        uint8_t channels = stream->config.channels;
+        uint8_t wl = stream->config.word_length;
+
+        aes67_convert_from_net(payload, sample_buf, frames, channels, wl);
+
+        /* Write converted samples into the jitter ring buffer.
+         * Store as raw bytes matching the stream word length per channel. */
+        uint32_t data_bytes = frames * channels * wl;
+        uint32_t written = ringbuf_write(&stream->ring, (const uint8_t *)payload,
+                                         data_bytes);
+        if (written < data_bytes) {
+            stream->status.status_flags |= AES67_RTP_STATUS_OVERFLOW;
+        }
+
+        stream->status.packets_received++;
+    }
+
+    heap_caps_free(sample_buf);
+    heap_caps_free(rx_buf);
+    ESP_LOGI(TAG, "RX task stopped");
+    vTaskDelete(NULL);
+}
+
+/* --- Public API --- */
+
+esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
+                                bool use_psram,
+                                aes67_rtp_engine_handle_t *handle)
+{
+    if (!net_config || !handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    struct aes67_rtp_engine *engine = calloc(1, sizeof(*engine));
+    if (!engine) {
+        ESP_LOGE(TAG, "Failed to allocate engine");
+        return ESP_ERR_NO_MEM;
+    }
+
+    memcpy(&engine->net_config, net_config, sizeof(aes67_net_config_t));
+    engine->use_psram = use_psram;
+    engine->running = false;
+    engine->rx_sock = -1;
+    engine->rx_task = NULL;
+    engine->stream_count = 0;
+
+    /* Create the RX socket bound to the RTP port */
+    engine->rx_sock = aes67_net_create_udp_socket(net_config->rtp_port, true);
+    if (engine->rx_sock < 0) {
+        ESP_LOGE(TAG, "Failed to create RX socket on port %u",
+                 net_config->rtp_port);
+        free(engine);
+        return ESP_FAIL;
+    }
+
+    /* Set socket receive timeout so the RX task can check the running flag */
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 }; /* 100ms */
+    setsockopt(engine->rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    /* Set socket buffer sizes for low-latency audio */
+    aes67_net_set_buffers(engine->rx_sock, 0, 65536);
+
+    *handle = engine;
+    ESP_LOGI(TAG, "Engine initialized, RX socket on port %u",
+             net_config->rtp_port);
+    return ESP_OK;
+}
+
+esp_err_t aes67_rtp_engine_start(aes67_rtp_engine_handle_t handle)
+{
+    if (!handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    struct aes67_rtp_engine *engine = handle;
+    if (engine->running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    engine->running = true;
+
+    /* Start the RX task */
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        rx_task_func,
+        "aes67_rx",
+        AES67_RX_TASK_STACK,
+        engine,
+        CONFIG_AES67_TASK_PRIORITY_RTP,
+        &engine->rx_task,
+        1   /* Pin to core 1 to avoid contention with audio on core 0 */
+    );
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create RX task");
+        engine->running = false;
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Engine started");
+    return ESP_OK;
+}
+
+esp_err_t aes67_rtp_engine_stop(aes67_rtp_engine_handle_t handle)
+{
+    if (!handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    struct aes67_rtp_engine *engine = handle;
+    if (!engine->running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    engine->running = false;
+
+    /* The RX task will exit on the next recvfrom timeout */
+    if (engine->rx_task) {
+        /* Give the task time to notice the flag and exit */
+        vTaskDelay(pdMS_TO_TICKS(200));
+        engine->rx_task = NULL;
+    }
+
+    ESP_LOGI(TAG, "Engine stopped");
+    return ESP_OK;
+}
+
+esp_err_t aes67_rtp_engine_destroy(aes67_rtp_engine_handle_t handle)
+{
+    if (!handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    struct aes67_rtp_engine *engine = handle;
+
+    /* Stop if still running */
+    if (engine->running) {
+        aes67_rtp_engine_stop(engine);
+    }
+
+    /* Remove all streams */
+    for (int i = 0; i < AES67_MAX_STREAMS; i++) {
+        if (engine->streams[i]) {
+            aes67_rtp_stream_remove(engine, engine->streams[i]);
+        }
+    }
+
+    /* Close RX socket */
+    if (engine->rx_sock >= 0) {
+        close(engine->rx_sock);
+        engine->rx_sock = -1;
+    }
+
+    free(engine);
+    ESP_LOGI(TAG, "Engine destroyed");
+    return ESP_OK;
+}
+
+esp_err_t aes67_rtp_stream_add(aes67_rtp_engine_handle_t engine_handle,
+                               const aes67_rtp_stream_config_t *config,
+                               aes67_rtp_stream_handle_t *stream)
+{
+    if (!engine_handle || !config || !stream) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    struct aes67_rtp_engine *engine = engine_handle;
+
+    /* Find a free slot */
+    int slot = -1;
+    for (int i = 0; i < AES67_MAX_STREAMS; i++) {
+        if (!engine->streams[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        ESP_LOGE(TAG, "Maximum number of streams reached (%d)", AES67_MAX_STREAMS);
+        return ESP_ERR_NO_MEM;
+    }
+
+    struct aes67_rtp_stream *s = calloc(1, sizeof(*s));
+    if (!s) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    memcpy(&s->config, config, sizeof(aes67_rtp_stream_config_t));
+    s->direction = config->direction;
+    s->ssrc = config->ssrc;
+    s->seq_num = 0;
+    s->tx_sock = -1;
+    s->active = false;
+    s->first_packet = true;
+    memset(&s->status, 0, sizeof(s->status));
+
+    /* Compute packet dimensions */
+    s->samples_per_packet = compute_samples_per_packet(config->sample_rate,
+                                                       config->packet_time_us);
+    s->packet_payload_size = s->samples_per_packet * config->channels *
+                             config->word_length;
+
+    ESP_LOGD(TAG, "Stream: %u samples/packet, %lu bytes payload",
+             s->samples_per_packet, (unsigned long)s->packet_payload_size);
+
+    /* Allocate ring and scratch buffers */
+    esp_err_t err = stream_alloc_buffers(s, engine->use_psram);
+    if (err != ESP_OK) {
+        free(s);
+        return err;
+    }
+
+    /* Set up destination address */
+    memset(&s->dest_addr, 0, sizeof(s->dest_addr));
+    s->dest_addr.sin_family = AF_INET;
+    s->dest_addr.sin_port = htons(config->dest_port);
+    s->dest_addr.sin_addr.s_addr = config->dest_ip;
+
+    /* Source streams: create a TX socket */
+    if (s->direction == AES67_STREAM_SOURCE) {
+        s->tx_sock = aes67_net_create_udp_socket(config->src_port, true);
+        if (s->tx_sock < 0) {
+            ESP_LOGE(TAG, "Failed to create TX socket on port %u",
+                     config->src_port);
+            stream_free_buffers(s);
+            free(s);
+            return ESP_FAIL;
+        }
+
+        /* Set QoS and TTL on the TX socket */
+        aes67_net_set_dscp(s->tx_sock, config->dscp);
+        aes67_net_set_multicast_ttl(s->tx_sock, config->ttl);
+    }
+
+    /* Sink streams: join multicast group on the RX socket */
+    if (s->direction == AES67_STREAM_SINK && aes67_net_is_multicast(config->dest_ip)) {
+        char mcast_str[16];
+        aes67_net_u32_to_ip(config->dest_ip, mcast_str, sizeof(mcast_str));
+        err = aes67_net_join_multicast(engine->rx_sock, mcast_str, NULL);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to join multicast group %s", mcast_str);
+        }
+    }
+
+    s->active = true;
+    engine->streams[slot] = s;
+    engine->stream_count++;
+    *stream = s;
+
+    char ip_str[16];
+    aes67_net_u32_to_ip(config->dest_ip, ip_str, sizeof(ip_str));
+    ESP_LOGI(TAG, "Added %s stream [%d]: %s:%u, %u ch, %u Hz, %u-bit, SSRC=0x%08lx",
+             s->direction == AES67_STREAM_SOURCE ? "source" : "sink",
+             slot, ip_str, config->dest_port,
+             config->channels, config->sample_rate,
+             config->word_length * 8, (unsigned long)config->ssrc);
+
+    return ESP_OK;
+}
+
+esp_err_t aes67_rtp_stream_remove(aes67_rtp_engine_handle_t engine_handle,
+                                  aes67_rtp_stream_handle_t stream)
+{
+    if (!engine_handle || !stream) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    struct aes67_rtp_engine *engine = engine_handle;
+    struct aes67_rtp_stream *s = stream;
+
+    /* Find and clear the slot */
+    int slot = -1;
+    for (int i = 0; i < AES67_MAX_STREAMS; i++) {
+        if (engine->streams[i] == s) {
+            slot = i;
+            engine->streams[i] = NULL;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    s->active = false;
+
+    /* Leave multicast group for sink streams */
+    if (s->direction == AES67_STREAM_SINK &&
+        aes67_net_is_multicast(s->config.dest_ip)) {
+        char mcast_str[16];
+        aes67_net_u32_to_ip(s->config.dest_ip, mcast_str, sizeof(mcast_str));
+        aes67_net_leave_multicast(engine->rx_sock, mcast_str, NULL);
+    }
+
+    /* Close TX socket for source streams */
+    if (s->tx_sock >= 0) {
+        close(s->tx_sock);
+        s->tx_sock = -1;
+    }
+
+    stream_free_buffers(s);
+    engine->stream_count--;
+
+    ESP_LOGI(TAG, "Removed stream [%d]", slot);
+    free(s);
+    return ESP_OK;
+}
+
+esp_err_t aes67_rtp_stream_get_status(aes67_rtp_stream_handle_t stream,
+                                      aes67_rtp_stream_status_t *status)
+{
+    if (!stream || !status) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memcpy(status, &stream->status, sizeof(aes67_rtp_stream_status_t));
+    return ESP_OK;
+}
+
+esp_err_t aes67_rtp_source_write(aes67_rtp_stream_handle_t stream,
+                                 const void *samples, uint32_t frame_count)
+{
+    if (!stream || !samples) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (stream->direction != AES67_STREAM_SOURCE) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!stream->active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint32_t byte_count = frame_count * stream->config.channels *
+                          stream->config.word_length;
+    uint32_t written = ringbuf_write(&stream->ring, (const uint8_t *)samples,
+                                     byte_count);
+    if (written < byte_count) {
+        stream->status.status_flags |= AES67_RTP_STATUS_OVERFLOW;
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t aes67_rtp_sink_read(aes67_rtp_stream_handle_t stream,
+                              void *samples, uint32_t frame_count)
+{
+    if (!stream || !samples) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (stream->direction != AES67_STREAM_SINK) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint32_t byte_count = frame_count * stream->config.channels *
+                          stream->config.word_length;
+
+    /* If stream is muted, return silence */
+    if (stream->status.status_flags & AES67_RTP_STATUS_MUTED) {
+        memset(samples, 0, byte_count);
+        return ESP_OK;
+    }
+
+    uint32_t avail = ringbuf_available(&stream->ring);
+    if (avail < byte_count) {
+        /* Buffer underrun: output silence */
+        memset(samples, 0, byte_count);
+        stream->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint32_t read_bytes = ringbuf_read(&stream->ring, (uint8_t *)samples,
+                                       byte_count);
+    if (read_bytes < byte_count) {
+        /* Partial read, zero remainder */
+        memset((uint8_t *)samples + read_bytes, 0, byte_count - read_bytes);
+        stream->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    /* Clear underflow flag on successful read */
+    stream->status.status_flags &= ~AES67_RTP_STATUS_UNDERFLOW;
+    return ESP_OK;
+}
+
+esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,
+                                      uint32_t rtp_timestamp)
+{
+    if (!handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    struct aes67_rtp_engine *engine = handle;
+    if (!engine->running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    for (int i = 0; i < AES67_MAX_STREAMS; i++) {
+        struct aes67_rtp_stream *s = engine->streams[i];
+        if (!s || s->direction != AES67_STREAM_SOURCE || !s->active) {
+            continue;
+        }
+
+        uint32_t frame_size = s->config.channels * s->config.word_length;
+        uint32_t needed_bytes = s->samples_per_packet * frame_size;
+
+        /* Check if we have enough data in the ring buffer */
+        uint32_t avail = ringbuf_available(&s->ring);
+        if (avail < needed_bytes) {
+            s->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
+            continue;
+        }
+
+        /* Read raw samples from ring buffer into the packet payload area */
+        uint8_t *pkt = s->tx_packet_buf;
+        uint8_t *payload = pkt + AES67_RTP_HEADER_SIZE;
+
+        /* Read native-format samples from ring buffer into a temporary area,
+         * then convert to network byte order in the payload */
+        uint32_t read_bytes = ringbuf_read(&s->ring, payload, needed_bytes);
+        if (read_bytes < needed_bytes) {
+            s->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
+            continue;
+        }
+
+        /* Convert in-place is not safe; use a temp copy.
+         * The payload area has room, so we read into it, then convert
+         * from a stack copy. For embedded, we limit stack usage by
+         * processing in the payload buffer with a small temp. */
+        /* Actually, we need to convert from native int32_t (in ring buf)
+         * to packed network format. The ring buffer stores raw bytes at
+         * stream word_length, which is already in native format.
+         * We need to convert to big-endian packed format. */
+
+        /* The ring buffer stores native-endian packed samples.
+         * For L16: 2 bytes/sample native endian
+         * For L24: 3 bytes/sample native endian
+         * For L32: 4 bytes/sample native endian
+         *
+         * The convert functions expect int32_t input (left-justified).
+         * Since source_write takes raw samples at word_length, we
+         * need to handle the conversion differently.
+         *
+         * For simplicity and correctness, we convert using the
+         * aes67_convert_to_net function which takes int32_t input.
+         * This means the ring buffer should store int32_t samples
+         * (4 bytes per sample regardless of word_length).
+         *
+         * However, the API says samples are "at the stream's word length".
+         * So we store packed native samples and need to expand them
+         * before converting. For now, treat ring buffer as storing
+         * packed native-endian samples and do byte-swap to network order.
+         */
+
+        /* For L16/L24/L32: the data in the ring buffer is already in
+         * native format at the configured word length. We need to
+         * byte-swap each sample to big-endian for the RTP payload. */
+        uint8_t wl = s->config.word_length;
+        uint32_t total_samples = s->samples_per_packet * s->config.channels;
+
+        /* In-place byte swap from native (little-endian) to network (big-endian) */
+        for (uint32_t j = 0; j < total_samples; j++) {
+            uint8_t *sample = payload + j * wl;
+            if (wl == 2) {
+                uint8_t tmp = sample[0];
+                sample[0] = sample[1];
+                sample[1] = tmp;
+            } else if (wl == 3) {
+                uint8_t tmp = sample[0];
+                sample[0] = sample[2];
+                sample[2] = tmp;
+            } else if (wl == 4) {
+                uint8_t tmp0 = sample[0];
+                uint8_t tmp1 = sample[1];
+                sample[0] = sample[3];
+                sample[1] = sample[2];
+                sample[2] = tmp1;
+                sample[3] = tmp0;
+            }
+        }
+
+        /* Build RTP header */
+        rtp_build_header(pkt, s->config.payload_type, s->seq_num,
+                         rtp_timestamp, s->ssrc);
+        s->seq_num++;
+
+        /* Send the packet */
+        uint32_t pkt_size = AES67_RTP_HEADER_SIZE + s->packet_payload_size;
+        ssize_t sent = sendto(s->tx_sock, pkt, pkt_size, 0,
+                              (struct sockaddr *)&s->dest_addr,
+                              sizeof(s->dest_addr));
+        if (sent < 0) {
+            ESP_LOGW(TAG, "sendto failed for stream [%d]: %d (%s)",
+                     i, errno, strerror(errno));
+        } else {
+            s->status.packets_sent++;
+            s->status.last_rtp_timestamp = rtp_timestamp;
+            s->status.last_seq = s->seq_num - 1;
+            /* Clear underflow on successful send */
+            s->status.status_flags &= ~AES67_RTP_STATUS_UNDERFLOW;
+        }
+    }
+
+    return ESP_OK;
+}

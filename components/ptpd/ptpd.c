@@ -673,8 +673,8 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   /* PI controller gains (multiplicative, fixed-point * 1000).
    * These are the default gains used when offset is small (<1ms).
    * When offset is large, adaptive scaling increases them. */
-  state->offset_pi.kp = 200;   /* 0.2 as fixed-point *1000 */
-  state->offset_pi.ki = 20;    /* 0.02 as fixed-point *1000 */
+  state->offset_pi.kp = 150;   /* 0.15 as fixed-point *1000 */
+  state->offset_pi.ki = 10;    /* 0.01 as fixed-point *1000 */
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;
@@ -1425,12 +1425,10 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   int64_t abs_offset = (offset_ns < 0) ? -offset_ns : offset_ns;
 
   if (abs_offset > 1000000) {       /* > 1ms */
-    kp *= 3;
-    ki *= 3;
-  } else if (abs_offset > 100000) { /* > 100us */
     kp *= 2;
     ki *= 2;
   }
+  /* No extra scaling for 100us-1ms range -- let the base gains handle it */
 
   /* PI controller with multiplicative gains.
    * P term = offset_ppb * kp / 1000
@@ -1439,11 +1437,11 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
 
   state->offset_pi.drift_acc += (int32_t)((offset_ppb * ki) / 1000);
 
-  /* Clamp I term to +/- 100 ppm */
-  if (state->offset_pi.drift_acc > 100000) {
-    state->offset_pi.drift_acc = 100000;
-  } else if (state->offset_pi.drift_acc < -100000) {
-    state->offset_pi.drift_acc = -100000;
+  /* Clamp I term to +/- 50 ppm to prevent overshoot */
+  if (state->offset_pi.drift_acc > 50000) {
+    state->offset_pi.drift_acc = 50000;
+  } else if (state->offset_pi.drift_acc < -50000) {
+    state->offset_pi.drift_acc = -50000;
   }
 
   int32_t adj_ppb = p_term + state->offset_pi.drift_acc;

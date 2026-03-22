@@ -21,9 +21,7 @@ static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA: 4 descriptors at 192 frames = 768 frames = 16ms.
- * When full, i2s_channel_write blocks until a descriptor plays (4ms).
- * RTP RX writes one 192-frame packet per call, naturally paced. */
+/* I2S DMA: 4 descriptors at 192 frames = 768 frames = 16ms. */
 #define DMA_DESC_NUM            4
 #define DMA_FRAME_NUM           192
 
@@ -606,12 +604,6 @@ esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
 
     /* Log first few writes with sample values for debugging format issues */
     static uint32_t write_log_count = 0;
-    if (write_log_count % 1000 == 0) {
-        ESP_LOGI(TAG, "I2S timing: avg_write=%lldus avg_between=%lldus (%lu calls)",
-                 write_log_count > 0 ? (long long)(total_write_us / write_log_count) : 0,
-                 write_log_count > 1 ? (long long)(total_between_us / (write_log_count - 1)) : 0,
-                 (unsigned long)write_log_count);
-    }
     if (write_log_count < 3) {
         write_log_count++;
         ESP_LOGI(TAG, "I2S write #%lu: %u/%u bytes, frames=%lu, ret=%s, "

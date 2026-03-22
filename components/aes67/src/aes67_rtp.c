@@ -449,13 +449,12 @@ static void rx_task_func(void *arg)
                 sample_buf[f * 2 + 1] = mono;
             }
 
-            /* First 3 packets: buffer in jitter ring to prefill DMA */
+            /* First 3 packets: buffer to prefill DMA ring (12ms headroom) */
             if (stream->status.packets_received < 3) {
                 uint32_t data_bytes = frames * channels * sizeof(int32_t);
                 ringbuf_write(&stream->ring,
                               (const uint8_t *)sample_buf, data_bytes);
 
-                /* On 3rd packet, flush all buffered data to DMA ring */
                 if (stream->status.packets_received == 2) {
                     int32_t flush_buf[192 * 2];
                     for (int p = 0; p < 3; p++) {
@@ -478,36 +477,23 @@ static void rx_task_func(void *arg)
                           (const uint8_t *)sample_buf, data_bytes);
         }
 
-        /* Periodic stats every 1000 packets (~4 seconds) */
-        if (stream->status.packets_received > 0 &&
-            (stream->status.packets_received % 1000) == 0) {
-            ESP_LOGI(TAG, "RX stats: %lu pkts, %lu lost, %lu seq_err, "
-                     "jitter=%ld us, flags=0x%lx",
-                     (unsigned long)stream->status.packets_received,
-                     (unsigned long)stream->status.packets_lost,
-                     (unsigned long)stream->status.seq_errors,
-                     (long)stream->jitter_us,
-                     (unsigned long)stream->status.status_flags);
-        }
-
         stream->status.packets_received++;
 
-        /* Log first few received packets with full format info */
-        if (stream->status.packets_received <= 3) {
+        /* Minimal stats every 10000 packets (~40s). Keep log SHORT
+         * to minimize UART blocking time in the audio hot path. */
+        if ((stream->status.packets_received % 10000) == 0) {
+            ESP_LOGI(TAG, "RX: %luk pkts, %lu lost, j=%ldus",
+                     (unsigned long)(stream->status.packets_received / 1000),
+                     (unsigned long)stream->status.packets_lost,
+                     (long)stream->jitter_us);
+        }
+
+        /* Log first packet only */
+        if (stream->status.packets_received == 1) {
             const char *codec_str = (wl == 2) ? "L16" : (wl == 3) ? "L24" : (wl == 4) ? "L32" : "???";
-            ESP_LOGI(TAG, "RX pkt #%lu: seq=%u ssrc=0x%08lx pt=%u "
-                     "%s/%luHz/%uch, %lu bytes, %u frames. "
-                     "Raw[0..7]: %02x %02x %02x %02x %02x %02x %02x %02x | "
-                     "int32[0..3]: %+ld %+ld %+ld %+ld",
-                     (unsigned long)stream->status.packets_received,
-                     hdr.seq, (unsigned long)hdr.ssrc, hdr.pt,
+            ESP_LOGI(TAG, "RX: %s/%luHz/%uch, %lu bytes, %u frames",
                      codec_str, (unsigned long)stream->config.sample_rate,
-                     channels,
-                     (unsigned long)payload_len, frames,
-                     payload[0], payload[1], payload[2], payload[3],
-                     payload[4], payload[5], payload[6], payload[7],
-                     (long)sample_buf[0], (long)sample_buf[1],
-                     (long)sample_buf[2], (long)sample_buf[3]);
+                     channels, (unsigned long)payload_len, frames);
         }
     }
 

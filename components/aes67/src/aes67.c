@@ -238,19 +238,22 @@ static void playback_task(void *arg)
         total_frames += frames;
         write_count++;
 
-        /* Adaptive clock recovery DISABLED: ESP32-P4 I2S fractional divider
-         * has only 3472 ppm resolution (denom=288). Each numerator step causes
-         * a 0.35% pitch shift -- far too coarse for smooth clock recovery.
-         * Need APLL or different clock source for sub-ppm adjustment. */
-
+        /* Show RECENT fps (last 1000 writes) instead of cumulative average */
         if ((write_count % 1000) == 0) {
-            int64_t el = esp_timer_get_time() - start_us;
-            if (el > 0) {
-                ESP_LOGI(TAG, "PB: %lu fps, sb=%u/%u",
-                         (unsigned long)(total_frames * 1000000ULL / el),
-                         (unsigned)xStreamBufferBytesAvailable(sbuf),
-                         (unsigned)xStreamBufferSpacesAvailable(sbuf));
+            static int64_t last_stat_us = 0;
+            static uint32_t last_stat_frames = 0;
+            int64_t now = esp_timer_get_time();
+            if (last_stat_us > 0) {
+                int64_t delta_us = now - last_stat_us;
+                uint32_t delta_frames = total_frames - last_stat_frames;
+                if (delta_us > 0) {
+                    ESP_LOGI(TAG, "PB: %lu fps, sb=%u",
+                             (unsigned long)(delta_frames * 1000000ULL / delta_us),
+                             (unsigned)xStreamBufferBytesAvailable(sbuf));
+                }
             }
+            last_stat_us = now;
+            last_stat_frames = total_frames;
         }
     }
 

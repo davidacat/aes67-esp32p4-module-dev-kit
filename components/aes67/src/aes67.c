@@ -107,31 +107,32 @@ static void audio_frame_task(void *arg)
          * convert to network format, send RTP packets */
         aes67_rtp_engine_process_tx(node->rtp, rtp_ts);
 
-        /* RX: Feed sink jitter buffer audio to I2S playback. */
+        /* RX: Drain ALL available samples from sink jitter buffer to I2S.
+         * The RTP RX deposits packets in bursts (e.g. 192 frames every 4ms),
+         * while the TIC fires every 1ms. We drain whatever is available
+         * each TIC to keep the I2S DMA fed continuously. */
         if (playback_buf) {
             int sink_count = aes67_session_get_sink_count(node->session);
             for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
                 aes67_sink_t sink;
                 if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
                     sink.enabled && sink.rtp_stream) {
-                    esp_err_t read_err = aes67_rtp_sink_read(sink.rtp_stream,
-                                                              playback_buf, spp);
 
-                    /* Write to I2S directly from TIC task */
                     extern esp_err_t aes67_audio_direct_write(
                         aes67_audio_handle_t handle,
                         const int32_t *samples, uint32_t frame_count);
 
-                    if (read_err == ESP_OK) {
-                        aes67_audio_direct_write(node->audio,
-                                                  playback_buf, spp);
-                    } else {
-                        /* No sink data - output silence */
-                        memset(playback_buf, 0,
-                               spp * node->config.audio.channels * sizeof(int32_t));
-                        aes67_audio_direct_write(node->audio,
-                                                  playback_buf, spp);
-                    }
+                    /* Read and write in chunks until jitter buffer is drained */
+                    esp_err_t read_err;
+                    do {
+                        read_err = aes67_rtp_sink_read(sink.rtp_stream,
+                                                        playback_buf, spp);
+                        if (read_err == ESP_OK) {
+                            aes67_audio_direct_write(node->audio,
+                                                      playback_buf, spp);
+                        }
+                    } while (read_err == ESP_OK);
+
                     break;
                 }
             }

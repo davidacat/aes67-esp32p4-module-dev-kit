@@ -291,17 +291,16 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     /* Map word_length to I2S bit depth */
     i2s_slot_mode_t slot_mode = I2S_SLOT_MODE_STEREO;
 
-    /* Always use 32-bit slot width to match our internal int32_t DMA format.
-     * For 24-bit audio, the data occupies the upper 24 bits of the 32-bit
-     * word with the LSB zero-padded. Using 24-bit slot width with 32-bit
-     * DMA data causes frame alignment slip (1 byte per sample drift). */
+    /* Use 16-bit I2S to match the working ESP32-P4-NANO reference example.
+     * Our internal format is int32 but we convert to int16 before writing
+     * to the DMA via direct_write. */
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio_config->sample_rate),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, slot_mode),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, slot_mode),
     };
 
-    /* With 32-bit slot width, MCLK multiple 256 works for all bit depths */
-    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    /* MCLK 384x works for all bit depths including 16-bit */
+    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
 
     std_cfg.gpio_cfg = (i2s_std_gpio_config_t){
         .mclk = pins->mck_gpio,
@@ -529,22 +528,25 @@ esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
         return ESP_ERR_INVALID_ARG;
     }
 
-    size_t bytes_written = 0;
-    size_t bytes_to_write = frame_count * handle->config.channels * sizeof(int32_t);
-
-    esp_err_t ret = i2s_channel_write(handle->tx_chan, samples, bytes_to_write,
-                                       &bytes_written, portMAX_DELAY);
-
-    /* Log actual bytes written vs requested for debugging */
-    static uint32_t write_count = 0;
-    write_count++;
-    if (write_count <= 5 || (write_count % 5000) == 0) {
-        int32_t *s = (int32_t *)samples;
-        ESP_LOGI("aes67_audio", "I2S write #%lu: %u/%u bytes, first: L=%+ld R=%+ld",
-                 (unsigned long)write_count,
-                 (unsigned)bytes_written, (unsigned)bytes_to_write,
-                 (long)s[0], (long)s[1]);
+    /* Convert int32 (left-justified 24-bit) to int16 for the I2S DMA.
+     * Take the upper 16 bits of each 32-bit sample. */
+    uint32_t total_samples = frame_count * handle->config.channels;
+    int16_t *i2s_buf = (int16_t *)heap_caps_malloc(total_samples * sizeof(int16_t),
+                                                     MALLOC_CAP_INTERNAL);
+    if (!i2s_buf) {
+        return ESP_ERR_NO_MEM;
     }
+
+    for (uint32_t i = 0; i < total_samples; i++) {
+        i2s_buf[i] = (int16_t)(samples[i] >> 16);
+    }
+
+    size_t bytes_written = 0;
+    size_t bytes_to_write = total_samples * sizeof(int16_t);
+
+    esp_err_t ret = i2s_channel_write(handle->tx_chan, i2s_buf, bytes_to_write,
+                                       &bytes_written, portMAX_DELAY);
+    heap_caps_free(i2s_buf);
 
     /* Log first successful write for debugging */
     static bool first_write_logged = false;

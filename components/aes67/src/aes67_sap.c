@@ -111,8 +111,8 @@ static esp_err_t send_sap_packet(int sock, const uint8_t *pkt, int pkt_len)
                  AES67_SAP_PORT, errno);
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "SAP sent %d bytes to 224.2.127.254:%d",
-             sent, AES67_SAP_PORT);
+    ESP_LOGI(TAG, "SAP sent %d bytes to 224.2.127.254:%d (sock=%d)",
+             sent, AES67_SAP_PORT, sock);
     return ESP_OK;
 }
 
@@ -302,16 +302,30 @@ static void sap_rx_task(void *arg)
         int ret = select(ctx->sock + 1, &rfds, NULL, NULL, &tv);
         if (ret < 0) {
             if (errno == EINTR) continue;
-            ESP_LOGE(TAG, "select() failed: errno %d", errno);
+            ESP_LOGE(TAG, "SAP select() failed: errno %d", errno);
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
         if (ret > 0 && FD_ISSET(ctx->sock, &rfds)) {
-            int len = recv(ctx->sock, rx_buf, SAP_RX_BUF_SIZE, 0);
+            struct sockaddr_in from;
+            socklen_t from_len = sizeof(from);
+            int len = recvfrom(ctx->sock, rx_buf, SAP_RX_BUF_SIZE, 0,
+                               (struct sockaddr *)&from, &from_len);
             if (len > 0) {
-                ESP_LOGI(TAG, "SAP received %d bytes", len);
+                char from_ip[16];
+                inet_ntoa_r(from.sin_addr, from_ip, sizeof(from_ip));
+                ESP_LOGI(TAG, "SAP received %d bytes from %s:%d",
+                         len, from_ip, ntohs(from.sin_port));
                 handle_sap_rx(ctx, rx_buf, len);
+            }
+        } else if (ret == 0) {
+            /* Timeout - no SAP packets received in 5 seconds */
+            static int timeout_count = 0;
+            if (++timeout_count % 12 == 1) {
+                /* Log every ~60 seconds */
+                ESP_LOGW(TAG, "No SAP packets received (listening on 224.2.127.254:%d, sock=%d)",
+                         AES67_SAP_PORT, ctx->sock);
             }
         }
 

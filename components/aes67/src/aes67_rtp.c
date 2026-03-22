@@ -47,6 +47,8 @@ struct aes67_rtp_stream {
     struct sockaddr_in dest_addr;
     uint16_t seq_num;
     uint32_t ssrc;
+    uint32_t rtp_timestamp;     /* Running RTP timestamp, increments by samples_per_packet */
+    bool timestamp_initialized; /* Set once from PTP time on first TX */
     aes67_rtp_stream_status_t status;
     aes67_ringbuf_t ring;
     uint32_t samples_per_packet;
@@ -783,6 +785,14 @@ esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,
             continue;
         }
 
+        /* Initialize stream RTP timestamp from PTP time on first TX.
+         * After that, increment by samples_per_packet per packet for
+         * perfectly regular timestamps as AES67 requires. */
+        if (!s->timestamp_initialized) {
+            s->rtp_timestamp = rtp_timestamp;
+            s->timestamp_initialized = true;
+        }
+
         /* Ring buffer stores int32_t samples (4 bytes each, native endian).
          * Read them into a temp area, then convert to packed network order. */
         uint32_t samples_total = s->samples_per_packet * s->config.channels;
@@ -841,10 +851,11 @@ esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,
             continue;
         }
 
-        /* Build RTP header */
+        /* Build RTP header with the stream's running timestamp */
         rtp_build_header(pkt, s->config.payload_type, s->seq_num,
-                         rtp_timestamp, s->ssrc);
+                         s->rtp_timestamp, s->ssrc);
         s->seq_num++;
+        s->rtp_timestamp += s->samples_per_packet;
 
         /* Send the packet */
         uint32_t pkt_size = AES67_RTP_HEADER_SIZE + s->packet_payload_size;

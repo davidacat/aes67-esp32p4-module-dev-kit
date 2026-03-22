@@ -670,16 +670,13 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
 
-  /* PI controller gains for ppb-based frequency lock.
-   * These divide offset_ppb to produce a ppb adjustment value.
-   * With 1s sync interval:
-   * kp=30: 1ms offset -> ~33 ppm proportional correction
-   * ki=200: 1ms offset -> 5 ppm integral per cycle
-   *
-   * The integral converges to steady-state crystal drift in ~20s.
-   * The 2% leaky decay prevents windup. */
-  state->offset_pi.kp = 30;
-  state->offset_pi.ki = 200;
+  /* PI controller gains matching linuxptp convention (multiplicative).
+   * Stored as fixed-point * 1000 to avoid floating point.
+   * kp=700 means 0.7: offset_ppb * 700 / 1000
+   * ki=300 means 0.3: offset_ppb * 300 / 1000
+   * These are the linuxptp hardware-timestamping defaults. */
+  state->offset_pi.kp = 700;   /* 0.7 as fixed-point *1000 */
+  state->offset_pi.ki = 300;   /* 0.3 as fixed-point *1000 */
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;
@@ -1394,7 +1391,7 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
    * but still update timestamps for the next cycle. */
   if (state->last_offset_ns != 0) {
     int64_t delta = offset_ns - state->last_offset_ns;
-    if (delta > 2000000LL || delta < -2000000LL) {
+    if (delta > 500000LL || delta < -500000LL) {
       ESP_LOGD(TAG, "Outlier filtered: offset %+lld ns (prev %+lld, delta %+lld)",
                offset_ns, state->last_offset_ns, delta);
       /* Update prev timestamps but skip PI adjustment */
@@ -1407,11 +1404,10 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   }
   state->last_offset_ns = offset_ns;
 
-  /* Compute the actual sync interval for proper ppb scaling.
-   * offset_ns is error in nanoseconds. To convert to ppb (ns/s),
-   * we need to know the measurement interval. */
+  /* Convert offset from nanoseconds to ppb using the actual sync interval.
+   * ppb = offset_ns * 1e9 / interval_ns */
   int64_t local_time_ns_now = timespec_to_ns(local_timestamp);
-  int64_t interval_ns = 1000000000LL; /* default 1s */
+  int64_t interval_ns = 1000000000LL;
   if (state->local_time_ns_prev > 0) {
     int64_t measured = local_time_ns_now - state->local_time_ns_prev;
     if (measured > 100000000LL && measured < 5000000000LL) {
@@ -1419,34 +1415,30 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
     }
   }
 
-  /* Convert offset to ppb: how many ppb of frequency error would
-   * produce this offset over one sync interval.
-   * ppb_error = offset_ns * 1e9 / interval_ns */
   int64_t offset_ppb = (offset_ns * 1000000000LL) / interval_ns;
 
-  /* PI controller operating in ppb domain.
-   * P term: direct fraction of measured error
-   * I term: leaky integrator that converges to steady-state drift */
-  int32_t p_term = (int32_t)(offset_ppb / state->offset_pi.kp);
+  /* PI controller with multiplicative gains (linuxptp convention).
+   * P term = offset_ppb * kp / 1000  (kp=700 -> multiply by 0.7)
+   * I term: drift_acc += offset_ppb * ki / 1000  (ki=300 -> multiply by 0.3)
+   *
+   * No leaky integrator decay - linuxptp does not use one.
+   * Instead rely on clamping to prevent windup. */
+  int32_t p_term = (int32_t)((offset_ppb * state->offset_pi.kp) / 1000);
 
-  /* Leaky integrator: decay by 0.5% each cycle. This allows the integral
-   * to fully converge on the true crystal drift while still preventing
-   * windup from transient errors. */
-  state->offset_pi.drift_acc = (state->offset_pi.drift_acc * 199) / 200;
-  state->offset_pi.drift_acc += (int32_t)(offset_ppb / state->offset_pi.ki);
+  state->offset_pi.drift_acc += (int32_t)((offset_ppb * state->offset_pi.ki) / 1000);
 
-  /* Clamp I term to +/- 50 ppm (real crystal drift range) */
-  if (state->offset_pi.drift_acc > 50000) {
-    state->offset_pi.drift_acc = 50000;
-  } else if (state->offset_pi.drift_acc < -50000) {
-    state->offset_pi.drift_acc = -50000;
+  /* Clamp I term to +/- 100 ppm */
+  if (state->offset_pi.drift_acc > 100000) {
+    state->offset_pi.drift_acc = 100000;
+  } else if (state->offset_pi.drift_acc < -100000) {
+    state->offset_pi.drift_acc = -100000;
   }
 
   int32_t adj_ppb = p_term + state->offset_pi.drift_acc;
 
-  /* Clamp total correction to +/- 100 ppm */
-  if (adj_ppb > 100000) adj_ppb = 100000;
-  if (adj_ppb < -100000) adj_ppb = -100000;
+  /* Clamp total output to +/- 200 ppm */
+  if (adj_ppb > 200000) adj_ppb = 200000;
+  if (adj_ppb < -200000) adj_ppb = -200000;
 
   /* Use the ppb-based API (ETH_MAC_ESP_CMD_ADJ_PTP_TIME) which calls
    * emac_hal_ptp_adj_inc. This is idempotent: it always computes the

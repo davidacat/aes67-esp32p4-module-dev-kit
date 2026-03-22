@@ -159,6 +159,12 @@ static void audio_io_task(void *arg)
     ESP_LOGI(TAG, "I/O task started, frame_size=%lu samples", (unsigned long)frame_size);
 
     while (ctx->running) {
+        /* Capture is not needed for playback-only mode.
+         * Just sleep to avoid busy-looping. When capture is needed
+         * (for source streams from mic), this will be re-enabled. */
+        vTaskDelay(pdMS_TO_TICKS(100));
+        continue;
+
         /* 1. Read captured audio from I2S RX DMA */
         esp_err_t ret = i2s_channel_read(ctx->rx_chan, ctx->dma_rx_buf,
                                           ctx->dma_buf_size_bytes,

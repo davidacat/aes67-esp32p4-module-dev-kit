@@ -63,15 +63,14 @@ struct aes67_audio_ctx {
 
 /* --- Helpers --------------------------------------------------------------- */
 
-/* Map word_length (bytes per sample) to I2S bit depth */
+/* Always use 32-bit I2S data width for maximum DMA throughput.
+ * Our internal format is int32 and the ES8311 supports 32-bit slots.
+ * Using 24-bit mode causes the I2S driver to do extra bit manipulation
+ * that limits throughput to ~32kHz instead of 48kHz. */
 static i2s_data_bit_width_t word_length_to_bits(uint8_t word_length)
 {
-    switch (word_length) {
-    case 2:  return I2S_DATA_BIT_WIDTH_16BIT;
-    case 3:  return I2S_DATA_BIT_WIDTH_24BIT;
-    case 4:  return I2S_DATA_BIT_WIDTH_32BIT;
-    default: return I2S_DATA_BIT_WIDTH_24BIT;
-    }
+    (void)word_length;
+    return I2S_DATA_BIT_WIDTH_32BIT;
 }
 
 /* In ESP32-P4 Philips I2S mode with 32-bit slot width, the DMA data

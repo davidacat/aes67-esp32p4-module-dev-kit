@@ -24,6 +24,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "driver/i2s_std.h"
 
 static const char *TAG = "aes67";
 
@@ -127,12 +128,17 @@ static void playback_task(void *arg)
 {
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
 
-    uint32_t max_frames = 4800;
-    uint32_t spp = 48;  /* jitter buffer read unit */
-    int32_t *buf = heap_caps_malloc(max_frames * node->config.audio.channels *
-                                     sizeof(int32_t), MALLOC_CAP_INTERNAL);
+    /* Read and write one full source packet (192 frames) at a time.
+     * i2s_channel_write into a 384-frame DMA ring creates back-pressure
+     * once the ring is full, pacing output at 48kHz. */
+    const uint32_t write_frames = 192;
+    const uint32_t spp = 192;  /* Read full packets, not 48-frame chunks */
+    const uint8_t ch = node->config.audio.channels;
+
+    int32_t *buf = heap_caps_malloc(write_frames * ch * sizeof(int32_t),
+                                    MALLOC_CAP_INTERNAL);
     if (!buf) {
-        ESP_LOGE(TAG, "Playback task: failed to allocate buffer");
+        ESP_LOGE(TAG, "Playback task: alloc failed");
         vTaskDelete(NULL);
         return;
     }
@@ -140,16 +146,18 @@ static void playback_task(void *arg)
     extern esp_err_t aes67_audio_direct_write(
         aes67_audio_handle_t handle,
         const int32_t *samples, uint32_t frame_count);
+    extern uint32_t aes67_rtp_sink_available(aes67_rtp_stream_handle_t stream);
 
-    ESP_LOGI(TAG, "Playback task started (spp=%lu)", (unsigned long)spp);
+    ESP_LOGI(TAG, "Playback task started (%lu frames/write, DMA ring < write)",
+             (unsigned long)write_frames);
 
-    /* Cache the sink stream handle to avoid mutex contention with
-     * session manager on every iteration (1000 times/sec). */
     aes67_rtp_stream_handle_t cached_sink = NULL;
     bool prefilled = false;
+    uint32_t total_frames = 0;
+    uint32_t write_count = 0;
+    int64_t start_us = 0;
 
     while (node->running) {
-        /* Look up sink handle only if not cached */
         if (!cached_sink) {
             prefilled = false;
             int sink_count = aes67_session_get_sink_count(node->session);
@@ -160,8 +168,7 @@ static void playback_task(void *arg)
                     cached_sink = sink.rtp_stream;
                     ESP_LOGI(TAG, "Playback: locked to sink '%s' "
                              "(ch=%u, wl=%u, rate=%lu, ptime=%lu us)",
-                             sink.name,
-                             sink.rtp_config.channels,
+                             sink.name, sink.rtp_config.channels,
                              sink.rtp_config.word_length,
                              (unsigned long)sink.rtp_config.sample_rate,
                              (unsigned long)sink.rtp_config.packet_time_us);
@@ -174,62 +181,64 @@ static void playback_task(void *arg)
             }
         }
 
-        /* Prefill: let the jitter buffer accumulate before we start
-         * draining it. DMA auto_clear outputs silence until we write. */
         if (!prefilled) {
-            vTaskDelay(pdMS_TO_TICKS(150));
+            /* Wait for enough packets to fill the DMA ring (384 frames) */
+            vTaskDelay(pdMS_TO_TICKS(20));
             prefilled = true;
-            ESP_LOGI(TAG, "Playback: prefill done (150ms), starting output");
-        }
+            start_us = esp_timer_get_time();
 
-        /* Drain all available data from jitter buffer.
-         * Write only real audio -- no silence padding.
-         * DMA auto_clear handles underruns at the hardware level. */
-        uint32_t frames_batched = 0;
-        while (frames_batched + spp <= max_frames) {
-            int32_t *dst = buf + frames_batched * node->config.audio.channels;
-            esp_err_t err = aes67_rtp_sink_read(cached_sink, dst, spp);
-            if (err != ESP_OK) break;
-            frames_batched += spp;
-        }
-
-        if (frames_batched > 0) {
-            /* Mix stereo to mono for the ES8311 single-speaker output.
-             * Do this on our own buffer, not the ring buffer data. */
-            if (node->config.audio.channels == 2) {
-                for (uint32_t f = 0; f < frames_batched; f++) {
-                    int32_t left = buf[f * 2];
-                    int32_t right = buf[f * 2 + 1];
-                    int32_t mono = (left >> 1) + (right >> 1);
-                    buf[f * 2] = mono;
-                    buf[f * 2 + 1] = mono;
+            /* Pre-fill the DMA ring by writing 2 packets (384 frames).
+             * After this, the ring is full and subsequent writes block. */
+            for (int p = 0; p < 2; p++) {
+                if (aes67_rtp_sink_read(cached_sink, buf, spp) == ESP_OK) {
+                    if (ch == 2) {
+                        for (uint32_t f = 0; f < spp; f++) {
+                            int32_t mono = (buf[f*2] >> 1) + (buf[f*2+1] >> 1);
+                            buf[f*2] = mono; buf[f*2+1] = mono;
+                        }
+                    }
+                    aes67_audio_direct_write(node->audio, buf, spp);
                 }
             }
-            esp_err_t wr_ret = aes67_audio_direct_write(node->audio, buf, frames_batched);
-            if (wr_ret != ESP_OK) {
-                static uint32_t err_count = 0;
-                if ((++err_count % 100) == 1) {
-                    ESP_LOGW(TAG, "Playback write error: %s (count=%lu)",
-                             esp_err_to_name(wr_ret), (unsigned long)err_count);
-                }
+            ESP_LOGI(TAG, "Playback: DMA ring prefilled");
+        }
+
+        /* Wait for next packet from RTP RX (notification-driven) */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+
+        /* Read exactly one packet (192 frames). The i2s_channel_write
+         * will block because the DMA ring is already full from prefill.
+         * Blocking releases when DMA plays one descriptor (4ms at 48kHz).
+         * This is the pacing mechanism -- DMA hardware = 48kHz clock. */
+        if (aes67_rtp_sink_read(cached_sink, buf, spp) != ESP_OK)
+            continue;
+        uint32_t frames = spp;
+
+        /* Mono mix in-place */
+        if (ch == 2) {
+            for (uint32_t f = 0; f < frames; f++) {
+                int32_t mono = (buf[f * 2] >> 1) + (buf[f * 2 + 1] >> 1);
+                buf[f * 2] = mono;
+                buf[f * 2 + 1] = mono;
             }
-            static uint32_t total_frames = 0;
-            static uint32_t write_count = 0;
-            total_frames += frames_batched;
-            write_count++;
-            if ((write_count % 500) == 0) {
-                int64_t elapsed_us = esp_timer_get_time();
-                ESP_LOGI(TAG, "Playback: %lu writes, %lu total frames "
-                         "(%lu frames/sec, avg %lu frames/write)",
+        }
+
+        /* Write to I2S -- blocks until DMA descriptor consumed (~20ms).
+         * This blocking IS the playback pacing. */
+        aes67_audio_direct_write(node->audio, buf, frames);
+
+        total_frames += frames;
+        write_count++;
+        if ((write_count % 200) == 0) {
+            int64_t elapsed_us = esp_timer_get_time() - start_us;
+            uint32_t jbuf = aes67_rtp_sink_available(cached_sink);
+            if (elapsed_us > 0) {
+                ESP_LOGI(TAG, "Playback: %lu wr, %lu fps, jbuf=%lu, avg=%lu/wr",
                          (unsigned long)write_count,
-                         (unsigned long)total_frames,
                          (unsigned long)(total_frames * 1000000ULL / elapsed_us),
+                         (unsigned long)jbuf,
                          (unsigned long)(total_frames / write_count));
             }
-        } else {
-            /* No data -- DMA auto_clear outputs silence.
-             * Brief sleep to avoid busy-looping. */
-            vTaskDelay(pdMS_TO_TICKS(2));
         }
     }
 
@@ -428,8 +437,15 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
         /* Playback on core 1 at priority 20 (below lwIP 22, above RX 17).
          * lwIP processes packets first, then playback drains the jitter
          * buffer, then RX picks up from the socket. */
+        /* Playback on core 0, prio 20. Woken by RTP RX task notification
+         * when new data arrives -- no polling delay. */
         xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
-                                20, &pb_task, 1);
+                                20, &pb_task, 0);
+
+        /* Register playback task for notification from RTP RX */
+        extern void aes67_rtp_engine_set_notify_task(
+            aes67_rtp_engine_handle_t h, TaskHandle_t task);
+        aes67_rtp_engine_set_notify_task(handle->rtp, pb_task);
     }
 
     /* Start the hardware PTP frame timer and audio frame task.

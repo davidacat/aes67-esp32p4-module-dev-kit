@@ -63,6 +63,12 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 
+# Disable power management (real-time audio needs consistent performance)
+CONFIG_PM_ENABLE=n
+
+# Disable WiFi (Ethernet only, saves resources and avoids interference)
+CONFIG_ESP_WIFI_ENABLED=n
+
 # Flash
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_SPI_FLASH_SUPPORT_GD_CHIP=y

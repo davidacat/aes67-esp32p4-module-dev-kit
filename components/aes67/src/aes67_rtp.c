@@ -30,7 +30,7 @@ static const char *TAG = "aes67_rtp";
 #define AES67_MAX_STREAMS       (CONFIG_AES67_MAX_SOURCES + CONFIG_AES67_MAX_SINKS)
 #define AES67_RX_TASK_STACK     4096
 #define AES67_RX_BUF_SIZE       2048
-#define AES67_JITTER_BUF_MULT   8   /* 8 * packet_size, ~32ms for 192-frame packets */
+#define AES67_JITTER_BUF_MULT   16  /* 16 * packet_size, ~64ms for 192-frame packets */
 
 /* Ring buffer for audio data. Single reader, single writer. */
 typedef struct {
@@ -74,6 +74,8 @@ struct aes67_rtp_engine {
     /* Direct I2S playback from RX task */
     bool i2s_playback_enabled;
     void *audio_handle;
+    /* Task to notify when new sink data arrives */
+    TaskHandle_t playback_notify_task;
 };
 
 /* --- Ring buffer helpers --- */
@@ -218,7 +220,9 @@ static esp_err_t stream_alloc_buffers(struct aes67_rtp_stream *stream,
     /* Add 1 byte for ring buffer full/empty distinction */
     buf_size += 1;
 
-    uint32_t caps = use_psram ? MALLOC_CAP_SPIRAM : MALLOC_CAP_DEFAULT;
+    /* Always use internal SRAM for jitter buffer -- PSRAM reads add
+     * latency that causes the 10% throughput loss in i2s_channel_write path */
+    uint32_t caps = MALLOC_CAP_INTERNAL;
     stream->ring.data = heap_caps_malloc(buf_size, caps);
     if (!stream->ring.data) {
         ESP_LOGE(TAG, "Failed to allocate ring buffer (%lu bytes)", (unsigned long)buf_size);
@@ -438,11 +442,10 @@ static void rx_task_func(void *arg)
             stream->status.status_flags |= AES67_RTP_STATUS_OVERFLOW;
         }
 
-        /* Playback is handled by a separate task that drains the
-         * jitter ring buffer. We must NOT call i2s_channel_write here
-         * because it blocks for ~1ms, causing recvfrom to miss packets.
-         * The ring buffer write above stores the data for the playback
-         * task to consume. */
+        /* Notify playback task that new data is available */
+        if (engine->playback_notify_task) {
+            xTaskNotifyGive(engine->playback_notify_task);
+        }
 
         /* Periodic stats every 1000 packets (~4 seconds) */
         if (stream->status.packets_received > 0 &&
@@ -526,6 +529,14 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     ESP_LOGI(TAG, "Engine initialized, RX socket on port %u",
              net_config->rtp_port);
     return ESP_OK;
+}
+
+void aes67_rtp_engine_set_notify_task(aes67_rtp_engine_handle_t handle,
+                                      TaskHandle_t task)
+{
+    if (handle) {
+        handle->playback_notify_task = task;
+    }
 }
 
 void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t handle,
@@ -853,6 +864,14 @@ esp_err_t aes67_rtp_sink_read(aes67_rtp_stream_handle_t stream,
     /* Clear underflow flag on successful read */
     stream->status.status_flags &= ~AES67_RTP_STATUS_UNDERFLOW;
     return ESP_OK;
+}
+
+uint32_t aes67_rtp_sink_available(aes67_rtp_stream_handle_t stream)
+{
+    if (!stream || stream->direction != AES67_STREAM_SINK) return 0;
+    uint32_t bytes = ringbuf_available(&stream->ring);
+    uint32_t frame_bytes = stream->config.channels * sizeof(int32_t);
+    return frame_bytes > 0 ? bytes / frame_bytes : 0;
 }
 
 esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,

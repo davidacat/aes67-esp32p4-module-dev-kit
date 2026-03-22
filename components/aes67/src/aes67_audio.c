@@ -14,16 +14,18 @@
 #include "freertos/task.h"
 #include "driver/i2s_std.h"
 #include "driver/i2s_common.h"
+#include "esp_timer.h"
 
 static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA: 8 descriptors at 480 frames each = 3840 frames = 80ms.
- * Large DMA buffer reduces per-write overhead of i2s_channel_write.
- * For 16-bit stereo: 480 * 2ch * 2bytes = 1920 bytes per descriptor. */
-#define DMA_DESC_NUM            8
-#define DMA_FRAME_NUM           480
+/* I2S DMA: 2 descriptors at 192 frames = 384 frames = 8ms.
+ * SMALL ring so i2s_channel_write blocks when ring is full.
+ * This creates back-pressure that paces output at exactly 48kHz.
+ * The DMA ring must be smaller than our write size for this to work. */
+#define DMA_DESC_NUM            2
+#define DMA_FRAME_NUM           192
 
 
 struct aes67_audio_ctx {
@@ -50,6 +52,9 @@ struct aes67_audio_ctx {
     int16_t *i2s_conv_buf;
     uint32_t i2s_conv_buf_samples;
 
+    /* DMA completion semaphore - signaled by on_sent ISR callback */
+    SemaphoreHandle_t dma_sem;
+
     /* Frame callback */
     aes67_audio_frame_cb_t frame_cb;
     void *frame_cb_user_data;
@@ -65,6 +70,10 @@ struct aes67_audio_ctx {
 
 /* --- Helpers --------------------------------------------------------------- */
 
+/* Convert word_length (bytes per sample) to I2S bit width enum.
+ * Currently unused since we force 16-bit I2S for ES8311 compat,
+ * but kept for future use with other codecs. */
+__attribute__((unused))
 static i2s_data_bit_width_t word_length_to_bits(uint8_t word_length)
 {
     switch (word_length) {
@@ -99,6 +108,7 @@ static inline uint32_t ring_free(uint32_t wr, uint32_t rd, uint32_t capacity)
 
 /* Copy DMA buffer (32-bit slots) directly to capture ring buffer.
  * Both DMA and ring buffer use left-justified int32 format. */
+__attribute__((unused))
 static void dma_to_capture_ring(struct aes67_audio_ctx *ctx,
                                 const uint8_t *dma_buf,
                                 uint32_t frame_count)
@@ -120,6 +130,7 @@ static void dma_to_capture_ring(struct aes67_audio_ctx *ctx,
 
 /* Read from playback ring buffer and copy to DMA TX buffer.
  * Both use left-justified int32 format - direct copy, no shifting. */
+__attribute__((unused))
 static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
                                  uint8_t *dma_buf,
                                  uint32_t frame_count)
@@ -145,6 +156,20 @@ static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
         }
     }
     ctx->playback_rd = rd;
+}
+
+/* --- DMA callback --------------------------------------------------------- */
+
+/* ISR callback: fires when a DMA descriptor finishes playing.
+ * Gives the semaphore to wake the playback task immediately. */
+static IRAM_ATTR bool on_i2s_tx_sent(i2s_chan_handle_t handle,
+                                      i2s_event_data_t *event,
+                                      void *user_ctx)
+{
+    struct aes67_audio_ctx *ctx = (struct aes67_audio_ctx *)user_ctx;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(ctx->dma_sem, &woken);
+    return woken == pdTRUE;
 }
 
 /* --- Public API ----------------------------------------------------------- */
@@ -272,6 +297,13 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     ctx->playback_wr = 0;
     ctx->playback_rd = 0;
 
+    /* Binary semaphore: DMA ISR signals when ANY descriptor completes */
+    ctx->dma_sem = xSemaphoreCreateBinary();
+    if (!ctx->dma_sem) {
+        ESP_LOGE(TAG, "Failed to create DMA semaphore");
+        goto err_del_channel;
+    }
+
     /* Pre-allocate int16 conversion buffer for direct_write.
      * Size for max batch: 4800 frames * channels. */
     ctx->i2s_conv_buf_samples = 4800 * audio_config->channels;
@@ -311,9 +343,21 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
         return ESP_OK;
     }
 
+    /* Register DMA TX callback before enabling channel */
+    i2s_event_callbacks_t cbs = {
+        .on_recv = NULL,
+        .on_recv_q_ovf = NULL,
+        .on_sent = on_i2s_tx_sent,
+        .on_send_q_ovf = NULL,
+    };
+    esp_err_t ret = i2s_channel_register_event_callback(handle->tx_chan, &cbs, handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to register I2S TX callback: %s", esp_err_to_name(ret));
+    }
+
     /* Enable both TX and RX channels. The ES8311 codec requires both
      * to be active (matching the official ESP-IDF es8311 example). */
-    esp_err_t ret = i2s_channel_enable(handle->tx_chan);
+    ret = i2s_channel_enable(handle->tx_chan);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to enable TX channel: %s", esp_err_to_name(ret));
         return ret;
@@ -479,19 +523,40 @@ esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
     size_t bytes_written = 0;
     size_t bytes_to_write = total_samples * sizeof(int16_t);
 
+    int64_t t0 = esp_timer_get_time();
     esp_err_t ret = i2s_channel_write(handle->tx_chan, i2s_buf, bytes_to_write,
                                        &bytes_written, portMAX_DELAY);
+    int64_t t1 = esp_timer_get_time();
+
+    /* Measure i2s_channel_write timing to find the throughput bottleneck */
+    static int64_t total_write_us = 0;
+    static int64_t total_between_us = 0;
+    static int64_t last_end_us = 0;
+    if (last_end_us > 0) {
+        total_between_us += (t0 - last_end_us);
+    }
+    last_end_us = t1;
+    total_write_us += (t1 - t0);
 
     /* Log first few writes with sample values for debugging format issues */
     static uint32_t write_log_count = 0;
+    if (write_log_count % 1000 == 0) {
+        ESP_LOGI(TAG, "I2S timing: avg_write=%lldus avg_between=%lldus (%lu calls)",
+                 write_log_count > 0 ? (long long)(total_write_us / write_log_count) : 0,
+                 write_log_count > 1 ? (long long)(total_between_us / (write_log_count - 1)) : 0,
+                 (unsigned long)write_log_count);
+    }
     if (write_log_count < 3) {
         write_log_count++;
-        ESP_LOGI(TAG, "I2S write #%lu: %u/%u bytes, frames=%lu, ret=%s. "
+        ESP_LOGI(TAG, "I2S write #%lu: %u/%u bytes, frames=%lu, ret=%s, "
+                 "write=%lldus, between=%lldus | "
                  "int32[0..3]: %+ld %+ld %+ld %+ld -> "
                  "int16[0..3]: %+d %+d %+d %+d",
                  (unsigned long)write_log_count,
                  (unsigned)bytes_written, (unsigned)bytes_to_write,
                  (unsigned long)frame_count, esp_err_to_name(ret),
+                 (long long)(t1 - t0),
+                 (long long)(last_end_us > 0 ? (t0 - (last_end_us - (t1 - t0))) : 0),
                  (long)samples[0], (long)samples[1],
                  (long)samples[2], (long)samples[3],
                  (int)i2s_buf[0], (int)i2s_buf[1],
@@ -530,4 +595,14 @@ esp_err_t aes67_audio_get_buffer_levels(aes67_audio_handle_t handle,
     }
 
     return ESP_OK;
+}
+
+SemaphoreHandle_t aes67_audio_get_dma_sem(aes67_audio_handle_t handle)
+{
+    return handle ? handle->dma_sem : NULL;
+}
+
+i2s_chan_handle_t aes67_audio_get_tx_chan(aes67_audio_handle_t handle)
+{
+    return handle ? handle->tx_chan : NULL;
 }

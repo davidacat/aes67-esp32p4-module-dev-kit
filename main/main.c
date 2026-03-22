@@ -284,6 +284,10 @@ void app_main(void)
 
     ESP_LOGI(TAG, "node ready -- streaming 1kHz test tone at -6 dBFS");
 
+    /* Drop main task priority below the default so IDLE can run.
+     * The tone generation is not time-critical. */
+    vTaskPrioritySet(NULL, tskIDLE_PRIORITY + 1);
+
     while (1) {
         /* Fill packet from precomputed LUT (zero float math in loop) */
         for (uint32_t i = 0; i < samples_per_packet; i++) {
@@ -297,6 +301,8 @@ void app_main(void)
         aes67_rtp_source_write(src_info.rtp_stream,
                                tone_buf, samples_per_packet);
 
+        /* 1ms pacing. At IDLE+1 priority the scheduler will preempt
+         * us for IDLE task watchdog resets. */
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }

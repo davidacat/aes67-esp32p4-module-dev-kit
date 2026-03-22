@@ -60,8 +60,8 @@ CONFIG_ETH_IRAM_OPTIMIZATION=y
 # mDNS
 CONFIG_MDNS_MAX_SERVICES=8
 
-# FreeRTOS - 10kHz tick for sub-ms audio/PTP timing resolution
-CONFIG_FREERTOS_HZ=10000
+# FreeRTOS - 1kHz tick (maximum supported, gives 1ms resolution)
+CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
 
 # System

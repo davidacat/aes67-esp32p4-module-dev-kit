@@ -431,6 +431,16 @@ esp_err_t aes67_node_get_session(aes67_node_handle_t handle,
     return ESP_OK;
 }
 
+esp_err_t aes67_node_get_audio(aes67_node_handle_t handle,
+                               aes67_audio_handle_t *audio)
+{
+    if (!handle || !audio) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *audio = handle->audio;
+    return ESP_OK;
+}
+
 esp_err_t aes67_node_get_sap(aes67_node_handle_t handle,
                               aes67_sap_handle_t *sap)
 {

@@ -1410,6 +1410,12 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   state->remote_time_ns_prev = remote_time_ns;
   state->local_time_ns_prev = local_time_ns;
 
+  /* Expose live values through ptpd_status() */
+  state->last_delta_ns = offset_ns;
+  if (local_delta_ns > 0) {
+    state->drift_ppb = (long)((tick_diff * 1000000000LL) / local_delta_ns);
+  }
+
   ESP_LOGD(TAG, "remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
   ESP_LOGD(TAG, "offset_ns %lli, adj %li, drift_acc %li", offset_ns, adj, state->offset_pi.drift_acc);
 

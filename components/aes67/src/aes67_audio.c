@@ -537,6 +537,17 @@ esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
     esp_err_t ret = i2s_channel_write(handle->tx_chan, samples, bytes_to_write,
                                        &bytes_written, portMAX_DELAY);
 
+    /* Log actual bytes written vs requested for debugging */
+    static uint32_t write_count = 0;
+    write_count++;
+    if (write_count <= 5 || (write_count % 5000) == 0) {
+        int32_t *s = (int32_t *)samples;
+        ESP_LOGI("aes67_audio", "I2S write #%lu: %u/%u bytes, first: L=%+ld R=%+ld",
+                 (unsigned long)write_count,
+                 (unsigned)bytes_written, (unsigned)bytes_to_write,
+                 (long)s[0], (long)s[1]);
+    }
+
     /* Log first successful write for debugging */
     static bool first_write_logged = false;
     if (!first_write_logged && bytes_written > 0) {

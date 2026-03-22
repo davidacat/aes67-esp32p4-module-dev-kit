@@ -185,7 +185,6 @@ static void playback_task(void *arg)
             ESP_LOGI(TAG, "Playback: stream buffer tight-loop mode");
         }
 
-        /* Get the stream buffer from RTP engine */
         extern StreamBufferHandle_t aes67_rtp_engine_get_stream_buf(void *h);
         StreamBufferHandle_t sbuf = aes67_rtp_engine_get_stream_buf(node->rtp);
         if (!sbuf) {
@@ -193,19 +192,33 @@ static void playback_task(void *arg)
             continue;
         }
 
-        /* Tight loop: read int16 from stream buffer, write to I2S.
-         * i2s_channel_write blocks when DMA is full = 48kHz pacing.
-         * This matches the test tone loop that played perfectly. */
-        extern esp_err_t aes67_audio_direct_write_i16(
-            aes67_audio_handle_t h, const int16_t *samples,
-            uint32_t sample_count);
+        /* Sample-hold: when stream buffer has a full packet, use it.
+         * When empty, repeat last good frame -- no silence gaps. */
+        int16_t pcm_buf[192 * 2];
+        static int16_t hold_buf[192 * 2];
+        static bool have_hold = false;
+        uint32_t frames;
 
-        int16_t pcm_buf[192 * 2];  /* One packet worth */
-        size_t got = xStreamBufferReceive(sbuf, pcm_buf, sizeof(pcm_buf),
-                                           pdMS_TO_TICKS(50));
-        if (got == 0) continue;
-
-        uint32_t frames = got / (ch * sizeof(int16_t));
+        size_t avail = xStreamBufferBytesAvailable(sbuf);
+        if (avail >= 768) {
+            /* Full packet ready -- read and update hold buffer */
+            size_t got = xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
+            frames = 192;
+            memcpy(hold_buf, pcm_buf, 768);
+            have_hold = true;
+        } else if (have_hold) {
+            /* No new data -- repeat last good frame (sample hold) */
+            memcpy(pcm_buf, hold_buf, 768);
+            frames = 192;
+        } else {
+            /* Wait for first packet */
+            size_t got = xStreamBufferReceive(sbuf, pcm_buf, 768,
+                                              pdMS_TO_TICKS(50));
+            if (got < 768) continue;
+            frames = 192;
+            memcpy(hold_buf, pcm_buf, 768);
+            have_hold = true;
+        }
 
         /* Write int16 directly to I2S */
         {
@@ -213,7 +226,8 @@ static void playback_task(void *arg)
             extern i2s_chan_handle_t aes67_audio_get_tx_chan(void *h);
             i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
             if (tx) {
-                i2s_channel_write(tx, pcm_buf, got, &written, portMAX_DELAY);
+                i2s_channel_write(tx, pcm_buf, frames * ch * sizeof(int16_t),
+                                  &written, portMAX_DELAY);
             }
         }
 

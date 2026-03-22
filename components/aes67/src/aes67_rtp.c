@@ -341,20 +341,29 @@ static void rx_task_func(void *arg)
         struct sockaddr_in src_addr;
         socklen_t addr_len = sizeof(src_addr);
 
+        /* First recv blocks until a packet arrives.
+         * Subsequent recvs use MSG_DONTWAIT to drain the socket buffer
+         * without blocking, reducing the per-packet lwIP overhead. */
+        static int drain_pass = 0;
+        int flags = drain_pass ? MSG_DONTWAIT : 0;
+
         int64_t t0 = esp_timer_get_time();
-        int recv_len = recvfrom(engine->rx_sock, rx_buf, AES67_RX_BUF_SIZE, 0,
+        int recv_len = recvfrom(engine->rx_sock, rx_buf, AES67_RX_BUF_SIZE, flags,
                                 (struct sockaddr *)&src_addr, &addr_len);
         int64_t t1 = esp_timer_get_time();
         if (recv_len < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                drain_pass = 0;  /* No more queued packets, block next time */
                 continue;
             }
             if (!engine->running) {
                 break;
             }
             ESP_LOGW(TAG, "recvfrom error: %d (%s)", errno, strerror(errno));
+            drain_pass = 0;
             continue;
         }
+        drain_pass = 1;  /* Got a packet, try non-blocking next */
 
         if (recv_len < AES67_RTP_HEADER_SIZE) {
             continue;
@@ -458,38 +467,18 @@ static void rx_task_func(void *arg)
                 sample_buf[f * 2 + 1] = mono;
             }
 
-            /* First 4 packets: buffer to fill entire DMA ring (16ms).
-             * ALL 4 descriptors must be written -- an unwritten descriptor
-             * plays silence every 16ms, causing periodic crackling. */
-            if (stream->status.packets_received < 4) {
-                uint32_t data_bytes = frames * channels * sizeof(int32_t);
-                ringbuf_write(&stream->ring,
-                              (const uint8_t *)sample_buf, data_bytes);
-
-                if (stream->status.packets_received == 3) {
-                    int32_t flush_buf[192 * 2];
-                    for (int p = 0; p < 4; p++) {
-                        uint32_t rb = frames * channels * sizeof(int32_t);
-                        if (ringbuf_read(&stream->ring, (uint8_t *)flush_buf, rb) == rb) {
-                            aes67_audio_direct_write(engine->audio_handle,
-                                                      flush_buf, frames);
-                        }
-                    }
+            /* All packets go to stream buffer. Playback task handles I2S.
+             * No direct I2S writes from RTP RX -- avoids contention. */
+            if (engine->audio_stream_buf) {
+                int16_t i16buf[frames * channels];
+                for (uint32_t f = 0; f < frames; f++) {
+                    int32_t mono = (sample_buf[f*2] >> 1) + (sample_buf[f*2+1] >> 1);
+                    int16_t s16 = (int16_t)(mono >> 16);
+                    i16buf[f * 2] = s16;
+                    i16buf[f * 2 + 1] = s16;
                 }
-            } else {
-                /* Steady state: write int16 to stream buffer.
-                 * Playback task drains it to I2S in a tight loop. */
-                if (engine->audio_stream_buf) {
-                    int16_t i16buf[frames * channels];
-                    for (uint32_t f = 0; f < frames; f++) {
-                        int32_t mono = (sample_buf[f*2] >> 1) + (sample_buf[f*2+1] >> 1);
-                        int16_t s16 = (int16_t)(mono >> 16);
-                        i16buf[f * 2] = s16;
-                        i16buf[f * 2 + 1] = s16;
-                    }
-                    xStreamBufferSend(engine->audio_stream_buf, i16buf,
-                                       frames * channels * sizeof(int16_t), 0);
-                }
+                xStreamBufferSend(engine->audio_stream_buf, i16buf,
+                                   frames * channels * sizeof(int16_t), 0);
             }
         } else {
             /* Non-stereo fallback: jitter buffer */

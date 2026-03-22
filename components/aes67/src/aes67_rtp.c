@@ -30,7 +30,7 @@ static const char *TAG = "aes67_rtp";
 #define AES67_MAX_STREAMS       (CONFIG_AES67_MAX_SOURCES + CONFIG_AES67_MAX_SINKS)
 #define AES67_RX_TASK_STACK     4096
 #define AES67_RX_BUF_SIZE       2048
-#define AES67_JITTER_BUF_MULT   16  /* 16 * packet_size, ~64ms for 192-frame packets */
+#define AES67_JITTER_BUF_MULT   6   /* 6 * packet_size, ~24ms for 192-frame packets */
 
 /* Ring buffer for audio data. Single reader, single writer. */
 typedef struct {
@@ -433,18 +433,49 @@ static void rx_task_func(void *arg)
 
         aes67_convert_from_net(payload, sample_buf, frames, channels, wl);
 
-        /* Write ALL converted int32_t samples into the jitter ring buffer */
-        uint32_t data_bytes = frames * channels * sizeof(int32_t);
-        uint32_t written = ringbuf_write(&stream->ring,
-                                         (const uint8_t *)sample_buf,
-                                         data_bytes);
-        if (written < data_bytes) {
-            stream->status.status_flags |= AES67_RTP_STATUS_OVERFLOW;
-        }
+        /* Direct I2S write with DMA prefill. Buffer the first 3 packets
+         * (12ms) to fill the DMA ring, then write each packet as it
+         * arrives. The DMA stays ~12ms ahead, absorbing network jitter. */
+        if (engine->audio_handle && channels == 2) {
+            extern esp_err_t aes67_audio_direct_write(
+                void *h, const int32_t *samples, uint32_t frame_count);
 
-        /* Notify playback task that new data is available */
-        if (engine->playback_notify_task) {
-            xTaskNotifyGive(engine->playback_notify_task);
+            /* Mono mix in-place */
+            for (uint32_t f = 0; f < frames; f++) {
+                int32_t left  = sample_buf[f * 2];
+                int32_t right = sample_buf[f * 2 + 1];
+                int32_t mono  = (left >> 1) + (right >> 1);
+                sample_buf[f * 2]     = mono;
+                sample_buf[f * 2 + 1] = mono;
+            }
+
+            /* First 3 packets: buffer in jitter ring to prefill DMA */
+            if (stream->status.packets_received < 3) {
+                uint32_t data_bytes = frames * channels * sizeof(int32_t);
+                ringbuf_write(&stream->ring,
+                              (const uint8_t *)sample_buf, data_bytes);
+
+                /* On 3rd packet, flush all buffered data to DMA ring */
+                if (stream->status.packets_received == 2) {
+                    int32_t flush_buf[192 * 2];
+                    for (int p = 0; p < 3; p++) {
+                        uint32_t rb = frames * channels * sizeof(int32_t);
+                        if (ringbuf_read(&stream->ring, (uint8_t *)flush_buf, rb) == rb) {
+                            aes67_audio_direct_write(engine->audio_handle,
+                                                      flush_buf, frames);
+                        }
+                    }
+                }
+            } else {
+                /* Steady state: write directly, DMA blocks if ring full */
+                aes67_audio_direct_write(engine->audio_handle,
+                                          sample_buf, frames);
+            }
+        } else {
+            /* Non-stereo fallback: jitter buffer */
+            uint32_t data_bytes = frames * channels * sizeof(int32_t);
+            ringbuf_write(&stream->ring,
+                          (const uint8_t *)sample_buf, data_bytes);
         }
 
         /* Periodic stats every 1000 packets (~4 seconds) */

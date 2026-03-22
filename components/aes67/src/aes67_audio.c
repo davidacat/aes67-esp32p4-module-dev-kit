@@ -15,16 +15,16 @@
 #include "driver/i2s_std.h"
 #include "driver/i2s_common.h"
 #include "esp_timer.h"
+#include "esp_cache.h"
 
 static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA: 2 descriptors at 192 frames = 384 frames = 8ms.
- * SMALL ring so i2s_channel_write blocks when ring is full.
- * This creates back-pressure that paces output at exactly 48kHz.
- * The DMA ring must be smaller than our write size for this to work. */
-#define DMA_DESC_NUM            2
+/* I2S DMA: 4 descriptors at 192 frames = 768 frames = 16ms.
+ * When full, i2s_channel_write blocks until a descriptor plays (4ms).
+ * RTP RX writes one 192-frame packet per call, naturally paced. */
+#define DMA_DESC_NUM            4
 #define DMA_FRAME_NUM           192
 
 
@@ -55,13 +55,15 @@ struct aes67_audio_ctx {
     /* DMA completion semaphore - signaled by on_sent ISR callback */
     SemaphoreHandle_t dma_sem;
 
-    /* Staging ring buffer: playback task writes int16 data here,
-     * DMA ISR reads from here to fill DMA descriptors directly.
-     * This bypasses i2s_channel_write entirely. */
+    /* Staging ring buffer: RTP RX writes int16 data here,
+     * DMA ISR reads from here to fill DMA descriptors directly. */
     int16_t *staging_buf;
     uint32_t staging_size;      /* Total size in int16 samples */
     volatile uint32_t staging_wr;
     volatile uint32_t staging_rd;
+    volatile uint32_t staging_underruns;  /* ISR couldn't fill full descriptor */
+    volatile uint32_t staging_isr_count;  /* Total ISR calls */
+    volatile bool staging_ready;          /* ISR reads only when true */
 
     /* Frame callback */
     aes67_audio_frame_cb_t frame_cb;
@@ -174,6 +176,7 @@ static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
  * and its per-call overhead (semaphore, queue, cache sync).
  *
  * Then notifies the playback task to refill the staging buffer. */
+__attribute__((unused))
 static IRAM_ATTR bool on_i2s_tx_sent(i2s_chan_handle_t handle,
                                       i2s_event_data_t *event,
                                       void *user_ctx)
@@ -181,6 +184,14 @@ static IRAM_ATTR bool on_i2s_tx_sent(i2s_chan_handle_t handle,
     struct aes67_audio_ctx *ctx = (struct aes67_audio_ctx *)user_ctx;
     int16_t *dma_buf = (int16_t *)event->dma_buf;
     uint32_t dma_samples = event->size / sizeof(int16_t);
+
+    /* Don't read from staging until it has enough data */
+    if (!ctx->staging_ready) {
+        memset(dma_buf, 0, event->size);
+        esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        ctx->staging_isr_count++;
+        return false;
+    }
 
     /* Copy from staging ring to DMA buffer */
     uint32_t rd = ctx->staging_rd;
@@ -205,6 +216,15 @@ static IRAM_ATTR bool on_i2s_tx_sent(i2s_chan_handle_t handle,
     }
 
     ctx->staging_rd = (rd + to_copy) % cap;
+    ctx->staging_isr_count++;
+    if (to_copy < dma_samples) {
+        ctx->staging_underruns++;
+    }
+
+    /* Flush CPU cache to memory so DMA controller sees the new data.
+     * ESP32-P4 routes internal SRAM through L1 cache -- without this
+     * sync, DMA reads stale data and produces crackling. */
+    esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
     /* Notify playback task to refill staging buffer */
     BaseType_t woken = pdFALSE;
@@ -284,8 +304,7 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
     chan_cfg.dma_frame_num = DMA_FRAME_NUM;
-    chan_cfg.auto_clear = false;   /* We fill DMA buffers via ISR callback */
-    chan_cfg.auto_clear_after_cb = false;  /* Don't clear after our callback */
+    chan_cfg.auto_clear = true;    /* Silence on underrun */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {
@@ -338,8 +357,10 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     ctx->playback_wr = 0;
     ctx->playback_rd = 0;
 
-    /* Staging ring: playback task writes int16, DMA ISR reads.
-     * 40ms at 48kHz stereo = 1920 frames * 2ch = 3840 samples */
+    /* Staging ring: RTP RX writes int16, DMA ISR reads.
+     * 40ms at 48kHz stereo = 1920 frames * 2ch = 3840 samples.
+     * ~10 packets of headroom to absorb network jitter and
+     * phase differences between packet arrival and DMA consumption. */
     ctx->staging_size = 1920 * audio_config->channels;
     ctx->staging_buf = heap_caps_calloc(ctx->staging_size, sizeof(int16_t),
                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
@@ -349,6 +370,7 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     }
     ctx->staging_wr = 0;
     ctx->staging_rd = 0;
+    ctx->staging_ready = false;
 
     /* Binary semaphore: DMA ISR signals when descriptor consumed */
     ctx->dma_sem = xSemaphoreCreateBinary();
@@ -396,21 +418,12 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
         return ESP_OK;
     }
 
-    /* Register DMA TX callback before enabling channel */
-    i2s_event_callbacks_t cbs = {
-        .on_recv = NULL,
-        .on_recv_q_ovf = NULL,
-        .on_sent = on_i2s_tx_sent,
-        .on_send_q_ovf = NULL,
-    };
-    esp_err_t ret = i2s_channel_register_event_callback(handle->tx_chan, &cbs, handle);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to register I2S TX callback: %s", esp_err_to_name(ret));
-    }
+    /* DMA ISR callback disabled -- we write directly via i2s_channel_write
+     * from the RTP RX task (once per packet, ~33us overhead). */
 
     /* Enable both TX and RX channels. The ES8311 codec requires both
      * to be active (matching the official ESP-IDF es8311 example). */
-    ret = i2s_channel_enable(handle->tx_chan);
+    esp_err_t ret = i2s_channel_enable(handle->tx_chan);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to enable TX channel: %s", esp_err_to_name(ret));
         return ret;
@@ -679,7 +692,28 @@ esp_err_t aes67_audio_staging_write(aes67_audio_handle_t handle,
     }
 
     handle->staging_wr = (wr + sample_count) % cap;
+
+    /* Enable ISR reads once staging is at least half full (20ms).
+     * More headroom = more tolerance for network jitter. */
+    if (!handle->staging_ready) {
+        uint32_t new_wr = handle->staging_wr;
+        uint32_t cur_rd = handle->staging_rd;
+        uint32_t filled = (new_wr >= cur_rd) ? (new_wr - cur_rd) : (cap - cur_rd + new_wr);
+        if (filled >= cap / 2) {
+            handle->staging_ready = true;
+        }
+    }
+
     return ESP_OK;
+}
+
+void aes67_audio_get_staging_stats(aes67_audio_handle_t handle,
+                                    uint32_t *isr_count, uint32_t *underruns)
+{
+    if (handle) {
+        if (isr_count) *isr_count = handle->staging_isr_count;
+        if (underruns) *underruns = handle->staging_underruns;
+    }
 }
 
 SemaphoreHandle_t aes67_audio_get_dma_sem(aes67_audio_handle_t handle)

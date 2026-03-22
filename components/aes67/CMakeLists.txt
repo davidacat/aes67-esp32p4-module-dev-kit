@@ -26,4 +26,5 @@ idf_component_register(
         ptpd
         esp_eth_time
         esp_netif
+        esp_mm
 )

@@ -128,14 +128,11 @@ static void playback_task(void *arg)
 {
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
 
-    /* Read and write one full source packet (192 frames) at a time.
-     * i2s_channel_write into a 384-frame DMA ring creates back-pressure
-     * once the ring is full, pacing output at 48kHz. */
-    const uint32_t write_frames = 192;
-    const uint32_t spp = 192;  /* Read full packets, not 48-frame chunks */
+    const uint32_t spp = 192;  /* Read full source packets */
+    const uint32_t max_packets = 3;  /* Read up to 3 packets per cycle */
     const uint8_t ch = node->config.audio.channels;
 
-    int32_t *buf = heap_caps_malloc(write_frames * ch * sizeof(int32_t),
+    int32_t *buf = heap_caps_malloc(spp * ch * sizeof(int32_t),
                                     MALLOC_CAP_INTERNAL);
     if (!buf) {
         ESP_LOGE(TAG, "Playback task: alloc failed");
@@ -148,8 +145,8 @@ static void playback_task(void *arg)
         const int32_t *samples, uint32_t frame_count);
     extern uint32_t aes67_rtp_sink_available(aes67_rtp_stream_handle_t stream);
 
-    ESP_LOGI(TAG, "Playback task started (%lu frames/write, DMA ring < write)",
-             (unsigned long)write_frames);
+    ESP_LOGI(TAG, "Playback task started (spp=%lu, max %lu pkts/cycle)",
+             (unsigned long)spp, (unsigned long)max_packets);
 
     aes67_rtp_stream_handle_t cached_sink = NULL;
     bool prefilled = false;
@@ -181,67 +178,28 @@ static void playback_task(void *arg)
             }
         }
 
+        /* The direct RTP->staging path handles all audio.
+         * This task just monitors stats. No jitter buffer involvement. */
         if (!prefilled) {
-            /* Wait for enough packets to fill the DMA ring (384 frames) */
-            vTaskDelay(pdMS_TO_TICKS(20));
             prefilled = true;
             start_us = esp_timer_get_time();
-
-            /* Pre-fill the DMA ring by writing 2 packets (384 frames).
-             * After this, the ring is full and subsequent writes block. */
-            for (int p = 0; p < 2; p++) {
-                if (aes67_rtp_sink_read(cached_sink, buf, spp) == ESP_OK) {
-                    if (ch == 2) {
-                        for (uint32_t f = 0; f < spp; f++) {
-                            int32_t mono = (buf[f*2] >> 1) + (buf[f*2+1] >> 1);
-                            buf[f*2] = mono; buf[f*2+1] = mono;
-                        }
-                    }
-                    aes67_audio_direct_write(node->audio, buf, spp);
-                }
-            }
-            ESP_LOGI(TAG, "Playback: DMA ring prefilled");
+            ESP_LOGI(TAG, "Playback: direct RTP->staging mode (no jitter buffer)");
         }
 
-        /* Wait for RTP RX to notify new packet arrived.
-         * pdFALSE = decrement by 1 (not clear all), so we don't
-         * lose notifications when multiple packets arrive at once. */
-        ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(500));
 
-        /* Read one packet (192 frames) from jitter buffer */
-        if (aes67_rtp_sink_read(cached_sink, buf, spp) != ESP_OK)
-            continue;
-        uint32_t frames = spp;
+        extern void aes67_audio_get_staging_stats(
+            void *h, uint32_t *isr_count, uint32_t *underruns);
+        uint32_t isr_cnt = 0, underruns = 0;
+        aes67_audio_get_staging_stats(node->audio, &isr_cnt, &underruns);
+        uint32_t frames = 192;
 
-        /* Mono mix + int32->int16 conversion in single pass,
-         * write directly to the staging ring buffer (NOT i2s_channel_write).
-         * The DMA ISR copies from staging to DMA buffer. */
-        extern esp_err_t aes67_audio_staging_write(
-            aes67_audio_handle_t h, const int16_t *samples, uint32_t count);
-
-        int16_t conv_buf[spp * ch];
-        for (uint32_t f = 0; f < frames; f++) {
-            int32_t left  = buf[f * 2];
-            int32_t right = buf[f * 2 + 1];
-            int32_t mono  = (left >> 1) + (right >> 1);
-            int16_t s16   = (int16_t)(mono >> 16);
-            conv_buf[f * 2]     = s16;
-            conv_buf[f * 2 + 1] = s16;
-        }
-        aes67_audio_staging_write(node->audio, conv_buf, frames * ch);
-
-        total_frames += frames;
         write_count++;
-        if ((write_count % 200) == 0) {
-            int64_t elapsed_us = esp_timer_get_time() - start_us;
-            uint32_t jbuf = aes67_rtp_sink_available(cached_sink);
-            if (elapsed_us > 0) {
-                ESP_LOGI(TAG, "Playback: %lu wr, %lu fps, jbuf=%lu, avg=%lu/wr",
-                         (unsigned long)write_count,
-                         (unsigned long)(total_frames * 1000000ULL / elapsed_us),
-                         (unsigned long)jbuf,
-                         (unsigned long)(total_frames / write_count));
-            }
+        if ((write_count % 10) == 0) {  /* Every 5 seconds */
+            ESP_LOGI(TAG, "DMA ISR: %lu calls, %lu underruns (%.1f%%)",
+                     (unsigned long)isr_cnt,
+                     (unsigned long)underruns,
+                     isr_cnt > 0 ? (float)underruns * 100.0f / isr_cnt : 0.0f);
         }
     }
 
@@ -433,6 +391,14 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
     }
 
     handle->running = true;
+
+    /* Enable direct RTP RX -> staging ring path.
+     * RTP RX task converts and writes to staging inline,
+     * DMA ISR drains staging to I2S. No jitter buffer or playback task. */
+    extern void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t h,
+                                               void *audio);
+    aes67_rtp_engine_set_playback(handle->rtp, handle->audio);
+    ESP_LOGI(TAG, "Direct RTP->I2S path enabled (zero-buffer)");
 
     /* Start dedicated playback task AFTER running=true */
     {

@@ -127,9 +127,10 @@ static void playback_task(void *arg)
 {
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
 
-    /* Read in larger chunks (192 frames = 4ms) to reduce per-write
-     * overhead and better match the I2S DMA descriptor alignment. */
-    uint32_t spp = 192;
+    /* Read 48 frames (1ms) to match SIENNA's packet size.
+     * With 16 DMA descriptors at 48 frames each = 768 frames = 16ms of
+     * DMA buffer, the per-write overhead is amortized. */
+    uint32_t spp = 48;
     int32_t *buf = heap_caps_malloc(spp * node->config.audio.channels *
                                      sizeof(int32_t), MALLOC_CAP_INTERNAL);
     if (!buf) {

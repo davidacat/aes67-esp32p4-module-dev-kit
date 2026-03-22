@@ -278,7 +278,7 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     /* --- Configure I2S channels --- */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
-    chan_cfg.dma_frame_num = 192;  /* Match playback write chunk size */
+    chan_cfg.dma_frame_num = 48;   /* Match AES67 1ms packet size */
     chan_cfg.auto_clear = true;    /* Clear DMA buffer on underflow (silence) */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);

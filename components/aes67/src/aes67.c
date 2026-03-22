@@ -217,13 +217,21 @@ static void playback_task(void *arg)
             memcpy(pcm_buf, hold_buf, 768);
             frames = 192;
         } else {
-            /* Wait for first packet */
-            size_t got = xStreamBufferReceive(sbuf, pcm_buf, 768,
-                                              pdMS_TO_TICKS(50));
+            /* Wait for stream buffer to fill to 50% before starting.
+             * This gives ~128ms of headroom to absorb the ~10% rate
+             * deficit from lwIP per-packet overhead. */
+            size_t avail_init = xStreamBufferBytesAvailable(sbuf);
+            if (avail_init < 24576) {  /* Wait for ~128ms of data */
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            size_t got = xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
             if (got < 768) continue;
             frames = 192;
             memcpy(hold_buf, pcm_buf, 768);
             have_hold = true;
+            ESP_LOGI(TAG, "PB: initial fill %u bytes, starting playback",
+                     (unsigned)avail_init);
         }
 
         /* Write int16 directly to I2S */
@@ -242,7 +250,6 @@ static void playback_task(void *arg)
         if ((write_count % 1000) == 0) {
             int64_t el = esp_timer_get_time() - start_us;
             if (el > 0) {
-                extern uint32_t aes67_rtp_sink_available(void *s);
                 ESP_LOGI(TAG, "PB: %lu fps, sb=%u/%u",
                          (unsigned long)(total_frames * 1000000ULL / el),
                          (unsigned)xStreamBufferBytesAvailable(sbuf),

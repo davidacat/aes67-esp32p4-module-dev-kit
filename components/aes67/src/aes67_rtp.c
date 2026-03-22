@@ -333,9 +333,11 @@ static void rx_task_func(void *arg)
 
     ESP_LOGI(TAG, "RX task started on port %u", engine->net_config.rtp_port);
 
-    /* Timing stats for the RTP RX hot path */
+    /* Timing stats and packet arrival watchdog */
     static int64_t t_recv_total = 0, t_proc_total = 0;
     static uint32_t t_count = 0;
+    static int64_t last_pkt_time_us = 0;
+    static int64_t last_stall_warn_us = 0;
 
     while (engine->running) {
         struct sockaddr_in src_addr;
@@ -353,7 +355,17 @@ static void rx_task_func(void *arg)
         int64_t t1 = esp_timer_get_time();
         if (recv_len < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                drain_pass = 0;  /* No more queued packets, block next time */
+                drain_pass = 0;
+                /* Packet arrival watchdog -- start counting from first timeout */
+                int64_t now = esp_timer_get_time();
+                if (last_pkt_time_us == 0) last_pkt_time_us = now;
+                if ((now - last_pkt_time_us) > 500000) {  /* >500ms no packets */
+                    if ((now - last_stall_warn_us) > 1000000) {
+                        ESP_LOGW(TAG, "RX stall: no pkt for %lld ms",
+                                 (long long)((now - last_pkt_time_us) / 1000));
+                        last_stall_warn_us = now;
+                    }
+                }
                 continue;
             }
             if (!engine->running) {
@@ -363,7 +375,8 @@ static void rx_task_func(void *arg)
             drain_pass = 0;
             continue;
         }
-        drain_pass = 1;  /* Got a packet, try non-blocking next */
+        drain_pass = 1;
+        last_pkt_time_us = esp_timer_get_time();
 
         if (recv_len < AES67_RTP_HEADER_SIZE) {
             continue;
@@ -544,10 +557,10 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     engine->rx_task = NULL;
     engine->stream_count = 0;
 
-    /* Stream buffer: 32ms at 48kHz stereo int16 = 6144 bytes.
-     * Trigger at 768 bytes = one full packet (192 frames stereo int16).
-     * This prevents partial reads that cause extra overhead. */
-    engine->audio_stream_buf = xStreamBufferCreate(6144, 768);
+    /* Stream buffer: 256ms at 48kHz stereo int16 = 49152 bytes.
+     * Large buffer absorbs the ~10% rate deficit from lwIP overhead.
+     * Trigger at 768 bytes = one full packet. */
+    engine->audio_stream_buf = xStreamBufferCreate(49152, 768);
     if (!engine->audio_stream_buf) {
         ESP_LOGE(TAG, "Failed to create audio stream buffer");
     }

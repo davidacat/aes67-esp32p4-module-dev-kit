@@ -107,12 +107,12 @@ static esp_err_t send_sap_packet(int sock, const uint8_t *pkt, int pkt_len)
     int sent = sendto(sock, pkt, pkt_len, 0,
                       (struct sockaddr *)&dest, sizeof(dest));
     if (sent < 0) {
-        ESP_LOGE(TAG, "SAP sendto 224.2.127.254:%d failed: errno %d",
-                 AES67_SAP_PORT, errno);
+        ESP_LOGE(TAG, "SAP sendto %s:%d failed: errno %d",
+                 AES67_SAP_MCAST_ADDR, AES67_SAP_PORT, errno);
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "SAP sent %d bytes to 224.2.127.254:%d (sock=%d)",
-             sent, AES67_SAP_PORT, sock);
+    ESP_LOGD(TAG, "SAP sent %d bytes to %s:%d",
+             sent, AES67_SAP_MCAST_ADDR, AES67_SAP_PORT);
     return ESP_OK;
 }
 
@@ -313,19 +313,7 @@ static void sap_rx_task(void *arg)
             int len = recvfrom(ctx->sock, rx_buf, SAP_RX_BUF_SIZE, 0,
                                (struct sockaddr *)&from, &from_len);
             if (len > 0) {
-                char from_ip[16];
-                inet_ntoa_r(from.sin_addr, from_ip, sizeof(from_ip));
-                ESP_LOGI(TAG, "SAP received %d bytes from %s:%d",
-                         len, from_ip, ntohs(from.sin_port));
                 handle_sap_rx(ctx, rx_buf, len);
-            }
-        } else if (ret == 0) {
-            /* Timeout - no SAP packets received in 5 seconds */
-            static int timeout_count = 0;
-            if (++timeout_count % 12 == 1) {
-                /* Log every ~60 seconds */
-                ESP_LOGW(TAG, "No SAP packets received (listening on 224.2.127.254:%d, sock=%d)",
-                         AES67_SAP_PORT, ctx->sock);
             }
         }
 

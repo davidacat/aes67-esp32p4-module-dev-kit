@@ -17,17 +17,14 @@
 
 static const char *TAG = "aes67_audio";
 
-/* I/O task stack size and priority */
-#define AUDIO_IO_TASK_STACK     (4096)
-#define AUDIO_IO_TASK_PRIORITY  (22)
+/* Kept for future capture (RX) task */
 
-/* I2S DMA: 8 descriptors at 64 frames = 512 frames = 10.7ms.
- * Must be large enough to hold one full batch write (480 frames)
- * to avoid blocking overhead. */
+/* I2S DMA: 8 descriptors at 480 frames each = 3840 frames = 80ms.
+ * Large DMA buffer reduces per-write overhead of i2s_channel_write.
+ * For 16-bit stereo: 480 * 2ch * 2bytes = 1920 bytes per descriptor. */
 #define DMA_DESC_NUM            8
+#define DMA_FRAME_NUM           480
 
-/* Timeout for I2S read/write operations (ms) */
-#define I2S_IO_TIMEOUT_MS       100
 
 struct aes67_audio_ctx {
     i2s_chan_handle_t tx_chan;
@@ -47,6 +44,11 @@ struct aes67_audio_ctx {
     uint8_t *dma_rx_buf;
     uint8_t *dma_tx_buf;
     uint32_t dma_buf_size_bytes;
+
+    /* Pre-allocated int16 conversion buffer for direct_write.
+     * Avoids heap_caps_malloc/free on every write call. */
+    int16_t *i2s_conv_buf;
+    uint32_t i2s_conv_buf_samples;
 
     /* Frame callback */
     aes67_audio_frame_cb_t frame_cb;
@@ -145,70 +147,6 @@ static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
     ctx->playback_rd = rd;
 }
 
-/* --- I/O Task ------------------------------------------------------------- */
-
-static void audio_io_task(void *arg)
-{
-    struct aes67_audio_ctx *ctx = (struct aes67_audio_ctx *)arg;
-    const uint32_t frame_size = ctx->frame_size;
-    size_t bytes_read = 0;
-    size_t bytes_written = 0;
-    uint32_t frame_counter = 0;
-
-    ESP_LOGI(TAG, "I/O task started, frame_size=%lu samples", (unsigned long)frame_size);
-
-    while (ctx->running) {
-        /* Capture is not needed for playback-only mode.
-         * Just sleep to avoid busy-looping. When capture is needed
-         * (for source streams from mic), this will be re-enabled. */
-        vTaskDelay(pdMS_TO_TICKS(100));
-        continue;
-
-        /* 1. Read captured audio from I2S RX DMA */
-        esp_err_t ret = i2s_channel_read(ctx->rx_chan, ctx->dma_rx_buf,
-                                          ctx->dma_buf_size_bytes,
-                                          &bytes_read,
-                                          pdMS_TO_TICKS(I2S_IO_TIMEOUT_MS));
-        if (ret != ESP_OK) {
-            if (ret != ESP_ERR_TIMEOUT) {
-                ESP_LOGW(TAG, "i2s_channel_read error: %s", esp_err_to_name(ret));
-            }
-            continue;
-        }
-
-        /* Determine how many complete frames we actually received */
-        uint32_t samples_per_frame = ctx->config.channels;
-        uint32_t bytes_per_frame = samples_per_frame * sizeof(int32_t);
-        uint32_t frames_read = bytes_read / bytes_per_frame;
-
-        /* 2. Convert DMA data and push into capture ring buffer */
-        uint32_t cap_free = ring_free(ctx->capture_wr, ctx->capture_rd,
-                                      ctx->buf_size_frames);
-        uint32_t frames_to_store = (frames_read < cap_free) ? frames_read : cap_free;
-        if (frames_to_store > 0) {
-            dma_to_capture_ring(ctx, ctx->dma_rx_buf, frames_to_store);
-        }
-        if (frames_to_store < frames_read) {
-            ESP_LOGD(TAG, "Capture ring overflow, dropped %lu frames",
-                     (unsigned long)(frames_read - frames_to_store));
-        }
-
-        frame_counter++;
-
-        /* 3. Invoke the frame callback (drives RTP TX path) */
-        if (ctx->frame_cb) {
-            ctx->frame_cb(frame_counter, ctx->frame_cb_user_data);
-        }
-
-        /* Playback (I2S TX) is now handled directly by the TIC task
-         * via aes67_audio_direct_write(). We do NOT write to I2S TX
-         * here to avoid two tasks competing on the same channel. */
-    }
-
-    ESP_LOGI(TAG, "I/O task exiting");
-    vTaskDelete(NULL);
-}
-
 /* --- Public API ----------------------------------------------------------- */
 
 esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
@@ -277,9 +215,10 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     }
 
     /* --- Configure I2S channels --- */
+    /* Official ESP-IDF es8311 example for ESP32-P4 uses I2S_NUM_0 */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
-    chan_cfg.dma_frame_num = 48;   /* Match AES67 1ms packet size */
+    chan_cfg.dma_frame_num = DMA_FRAME_NUM;
     chan_cfg.auto_clear = true;    /* Clear DMA buffer on underflow (silence) */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
@@ -299,7 +238,7 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, slot_mode),
     };
 
-    /* MCLK 384x works for all bit depths including 16-bit */
+    /* MCLK 384x matches the official ESP-IDF es8311 example */
     std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
 
     std_cfg.gpio_cfg = (i2s_std_gpio_config_t){
@@ -333,6 +272,18 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     ctx->playback_wr = 0;
     ctx->playback_rd = 0;
 
+    /* Pre-allocate int16 conversion buffer for direct_write.
+     * Size for max batch: 4800 frames * channels. */
+    ctx->i2s_conv_buf_samples = 4800 * audio_config->channels;
+    ctx->i2s_conv_buf = heap_caps_malloc(
+        ctx->i2s_conv_buf_samples * sizeof(int16_t),
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!ctx->i2s_conv_buf) {
+        ESP_LOGE(TAG, "Failed to allocate I2S conversion buffer (%lu bytes)",
+                 (unsigned long)(ctx->i2s_conv_buf_samples * sizeof(int16_t)));
+        goto err_del_channel;
+    }
+
     *handle = ctx;
     ESP_LOGI(TAG, "Audio driver initialized (ring=%lu frames, dma=%lu bytes)",
              (unsigned long)ring_frames, (unsigned long)ctx->dma_buf_size_bytes);
@@ -360,38 +311,24 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
         return ESP_OK;
     }
 
-    /* Enable I2S channels */
-    esp_err_t ret = i2s_channel_enable(handle->rx_chan);
+    /* Enable both TX and RX channels. The ES8311 codec requires both
+     * to be active (matching the official ESP-IDF es8311 example). */
+    esp_err_t ret = i2s_channel_enable(handle->tx_chan);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable RX channel: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to enable TX channel: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    ret = i2s_channel_enable(handle->tx_chan);
+    ret = i2s_channel_enable(handle->rx_chan);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable TX channel: %s", esp_err_to_name(ret));
-        i2s_channel_disable(handle->rx_chan);
-        return ret;
+        ESP_LOGW(TAG, "Failed to enable RX channel: %s", esp_err_to_name(ret));
+        /* Non-fatal: TX still works */
     }
 
     handle->running = true;
 
-    /* Launch the I/O task on the highest priority */
-    BaseType_t xret = xTaskCreatePinnedToCore(
-        audio_io_task, "aes67_io",
-        AUDIO_IO_TASK_STACK, handle,
-        AUDIO_IO_TASK_PRIORITY, &handle->io_task,
-        1  /* Pin to core 1 to keep core 0 for networking */
-    );
-    if (xret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create I/O task");
-        handle->running = false;
-        i2s_channel_disable(handle->tx_chan);
-        i2s_channel_disable(handle->rx_chan);
-        return ESP_ERR_NO_MEM;
-    }
-
-    ESP_LOGI(TAG, "Audio I/O started");
+    ESP_LOGI(TAG, "Audio started (DMA: %d desc x %d frames)",
+             DMA_DESC_NUM, DMA_FRAME_NUM);
     return ESP_OK;
 }
 
@@ -404,19 +341,13 @@ esp_err_t aes67_audio_stop(aes67_audio_handle_t handle)
         return ESP_OK;
     }
 
-    /* Signal the I/O task to stop and wait for it to exit */
     handle->running = false;
-
-    /* Give the task time to notice the flag and exit.
-     * The task blocks in i2s_channel_read with I2S_IO_TIMEOUT_MS. */
-    vTaskDelay(pdMS_TO_TICKS(I2S_IO_TIMEOUT_MS + 50));
-    handle->io_task = NULL;
 
     /* Disable I2S channels */
     i2s_channel_disable(handle->tx_chan);
     i2s_channel_disable(handle->rx_chan);
 
-    ESP_LOGI(TAG, "Audio I/O stopped");
+    ESP_LOGI(TAG, "Audio stopped");
     return ESP_OK;
 }
 
@@ -440,6 +371,7 @@ esp_err_t aes67_audio_destroy(aes67_audio_handle_t handle)
     heap_caps_free(handle->playback_buf);
     heap_caps_free(handle->dma_rx_buf);
     heap_caps_free(handle->dma_tx_buf);
+    heap_caps_free(handle->i2s_conv_buf);
 
     free(handle);
     ESP_LOGI(TAG, "Audio driver destroyed");
@@ -528,15 +460,18 @@ esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Convert int32 (left-justified 24-bit) to int16 for the I2S DMA.
-     * Take the upper 16 bits of each 32-bit sample. */
     uint32_t total_samples = frame_count * handle->config.channels;
-    int16_t *i2s_buf = (int16_t *)heap_caps_malloc(total_samples * sizeof(int16_t),
-                                                     MALLOC_CAP_INTERNAL);
-    if (!i2s_buf) {
-        return ESP_ERR_NO_MEM;
+
+    /* Clamp to pre-allocated buffer capacity */
+    if (total_samples > handle->i2s_conv_buf_samples) {
+        total_samples = handle->i2s_conv_buf_samples;
+        frame_count = total_samples / handle->config.channels;
     }
 
+    /* Convert int32 (left-justified 24-bit) to int16 for the I2S DMA.
+     * Take the upper 16 bits of each 32-bit sample. Uses the
+     * pre-allocated buffer to avoid malloc/free per call. */
+    int16_t *i2s_buf = handle->i2s_conv_buf;
     for (uint32_t i = 0; i < total_samples; i++) {
         i2s_buf[i] = (int16_t)(samples[i] >> 16);
     }
@@ -546,15 +481,21 @@ esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
 
     esp_err_t ret = i2s_channel_write(handle->tx_chan, i2s_buf, bytes_to_write,
                                        &bytes_written, portMAX_DELAY);
-    heap_caps_free(i2s_buf);
 
-    /* Log first successful write for debugging */
-    static bool first_write_logged = false;
-    if (!first_write_logged && bytes_written > 0) {
-        first_write_logged = true;
-        ESP_LOGI("aes67_audio", "First I2S direct write: %u/%u bytes, ret=%s",
+    /* Log first few writes with sample values for debugging format issues */
+    static uint32_t write_log_count = 0;
+    if (write_log_count < 3) {
+        write_log_count++;
+        ESP_LOGI(TAG, "I2S write #%lu: %u/%u bytes, frames=%lu, ret=%s. "
+                 "int32[0..3]: %+ld %+ld %+ld %+ld -> "
+                 "int16[0..3]: %+d %+d %+d %+d",
+                 (unsigned long)write_log_count,
                  (unsigned)bytes_written, (unsigned)bytes_to_write,
-                 esp_err_to_name(ret));
+                 (unsigned long)frame_count, esp_err_to_name(ret),
+                 (long)samples[0], (long)samples[1],
+                 (long)samples[2], (long)samples[3],
+                 (int)i2s_buf[0], (int)i2s_buf[1],
+                 (int)i2s_buf[2], (int)i2s_buf[3]);
     }
 
     return ret;

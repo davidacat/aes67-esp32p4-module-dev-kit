@@ -35,6 +35,7 @@
 #include "aes67_audio.h"
 #include "dsps_tone_gen.h"
 #include "driver/i2c.h"
+#include "driver/i2s_std.h"
 #include "es8311.h"
 
 /* Session handle for SAP callback */
@@ -268,8 +269,8 @@ static esp_err_t es8311_codec_init(void)
     }
 
     /* Configure clock: MCLK from MCLK pin, 48kHz sample rate.
-     * MCLK frequency = sample_rate * mclk_multiple.
-     * We configured I2S with MCLK_MULTIPLE_384, so MCLK = 48000 * 384 = 18.432 MHz */
+     * I2S uses MCLK_MULTIPLE_384 (matching official ESP-IDF example).
+     * MCLK = 48000 * 384 = 18.432 MHz */
     es8311_clock_config_t clk_cfg = {
         .mclk_inverted = false,
         .sclk_inverted = false,
@@ -285,8 +286,7 @@ static esp_err_t es8311_codec_init(void)
         return ret;
     }
 
-    /* Set output volume (0-100) */
-    ret = es8311_voice_volume_set(codec, 40, NULL);
+    ret = es8311_voice_volume_set(codec, 80, NULL);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "ES8311 volume set failed: %s", esp_err_to_name(ret));
     }
@@ -304,7 +304,7 @@ static esp_err_t es8311_codec_init(void)
     /* Dump ES8311 register state for debugging */
     es8311_register_dump(codec);
 
-    ESP_LOGI(TAG, "ES8311 codec initialized (48kHz, 24-bit, vol=80, unmuted)");
+    ESP_LOGI(TAG, "ES8311 codec initialized (48kHz, 16-bit, MCLK=18.432MHz, vol=100)");
     return ESP_OK;
 }
 
@@ -341,12 +341,8 @@ void app_main(void)
     /* Enable the power amplifier before starting audio */
     pa_ctrl_enable();
 
-    /* Initialize the ES8311 audio codec via I2C */
-    esp_err_t codec_ret = es8311_codec_init();
-    if (codec_ret != ESP_OK) {
-        ESP_LOGW(TAG, "ES8311 codec init failed (audio may not work): %s",
-                 esp_err_to_name(codec_ret));
-    }
+    /* ES8311 codec init is deferred until AFTER the AES67 I2S driver starts.
+     * The ES8311 needs MCLK to be running during initialization. */
 
     /* Build the AES67 node configuration with our I2S pins and codec settings */
     aes67_config_t aes67_cfg = AES67_CONFIG_DEFAULT();
@@ -370,8 +366,18 @@ void app_main(void)
     aes67_node_handle_t node = NULL;
     ESP_ERROR_CHECK(aes67_node_init(&aes67_cfg, &node));
 
-    /* Start PTP sync, RTP engine, SAP announcements and audio I/O */
+    /* Start PTP sync, RTP engine, SAP announcements and audio I/O.
+     * This enables I2S which starts MCLK generation. */
     ESP_ERROR_CHECK(aes67_node_start(node));
+
+    /* Initialize ES8311 codec AFTER I2S is running (MCLK must be active).
+     * This is the critical init order discovered through testing. */
+    esp_err_t codec_ret = es8311_codec_init();
+    if (codec_ret != ESP_OK) {
+        ESP_LOGE(TAG, "ES8311 codec init FAILED: %s", esp_err_to_name(codec_ret));
+    } else {
+        ESP_LOGI(TAG, "ES8311 codec initialized (MCLK running)");
+    }
 
     /* Obtain the session manager handle from the node so we can add streams */
     aes67_session_handle_t session = NULL;

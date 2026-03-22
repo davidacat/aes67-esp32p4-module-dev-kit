@@ -159,7 +159,13 @@ static void playback_task(void *arg)
                 if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
                     sink.enabled && sink.rtp_stream) {
                     cached_sink = sink.rtp_stream;
-                    ESP_LOGI(TAG, "Playback: locked to sink stream");
+                    ESP_LOGI(TAG, "Playback: locked to sink '%s' "
+                             "(ch=%u, wl=%u, rate=%lu, ptime=%lu us)",
+                             sink.name,
+                             sink.rtp_config.channels,
+                             sink.rtp_config.word_length,
+                             (unsigned long)sink.rtp_config.sample_rate,
+                             (unsigned long)sink.rtp_config.packet_time_us);
                     break;
                 }
             }
@@ -169,9 +175,10 @@ static void playback_task(void *arg)
             }
         }
 
-        /* Batch-read from jitter buffer: accumulate up to max_frames
-         * before calling i2s_channel_write once. This amortizes the
-         * ~0.8ms per-call overhead of i2s_channel_write. */
+        /* Drain all available data from jitter buffer into a batch,
+         * then write it all in one i2s_channel_write call.
+         * No artificial waiting -- i2s_channel_write blocks until
+         * DMA consumes the data, which naturally paces at 48kHz. */
         uint32_t frames_batched = 0;
         while (frames_batched + spp <= max_frames) {
             int32_t *dst = buf + frames_batched * node->config.audio.channels;
@@ -192,12 +199,19 @@ static void playback_task(void *arg)
                     buf[f * 2 + 1] = mono;
                 }
             }
-            aes67_audio_direct_write(node->audio, buf, frames_batched);
+            esp_err_t wr_ret = aes67_audio_direct_write(node->audio, buf, frames_batched);
+            if (wr_ret != ESP_OK) {
+                static uint32_t err_count = 0;
+                if ((++err_count % 100) == 1) {
+                    ESP_LOGW(TAG, "Playback write error: %s (count=%lu)",
+                             esp_err_to_name(wr_ret), (unsigned long)err_count);
+                }
+            }
             static uint32_t total_frames = 0;
             static uint32_t write_count = 0;
             total_frames += frames_batched;
             write_count++;
-            if ((write_count % 2000) == 0) {
+            if ((write_count % 500) == 0) {
                 int64_t elapsed_us = esp_timer_get_time();
                 ESP_LOGI(TAG, "Playback: %lu writes, %lu total frames "
                          "(%lu frames/sec, avg %lu frames/write)",

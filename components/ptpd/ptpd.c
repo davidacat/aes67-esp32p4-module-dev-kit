@@ -72,6 +72,7 @@
 
 #ifdef ESP_PTP
 #include "ptpd.h"
+#include "esp_netif.h"
 #include "esp_eth_driver.h"
 #include "esp_vfs_l2tap.h"
 #include "semaphore.h"
@@ -696,6 +697,84 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
 #else
   state->own_identity.gm_priority1 = 255; // When daemon is statically configured as slave, set the worst
 #endif
+
+  /* --- UDP socket setup for AES67 interoperability ---
+   * In addition to L2 TAP, set up standard UDP sockets on the PTP
+   * multicast group (224.0.1.129) so we can communicate with devices
+   * that use PTP over UDP/IPv4 (which is most AES67 gear). */
+
+  /* Get interface IP for binding and IGMP */
+  esp_netif_t *netif = esp_netif_get_handle_from_ifkey(interface);
+  if (netif) {
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+      state->interface_addr.sin_family = AF_INET;
+      state->interface_addr.sin_addr.s_addr = ip_info.ip.addr;
+    }
+  }
+
+  /* Create UDP sockets */
+  state->tx_socket = socket(AF_INET, SOCK_DGRAM, 0);
+  state->event_socket = socket(AF_INET, SOCK_DGRAM, 0);
+  state->info_socket = socket(AF_INET, SOCK_DGRAM, 0);
+
+  if (state->tx_socket < 0 || state->event_socket < 0 || state->info_socket < 0) {
+    ptperr("Failed to create UDP sockets for PTP: %d\n", errno);
+    /* Non-fatal: L2 transport still works */
+  } else {
+    struct sockaddr_in bind_addr;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+
+    /* Join PTP multicast group via IGMP */
+    struct ip_mreq mreq;
+    mreq.imr_multiaddr.s_addr = htonl(PTP_MULTICAST_ADDR);
+    mreq.imr_interface.s_addr = state->interface_addr.sin_addr.s_addr;
+
+    if (setsockopt(state->event_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                   &mreq, sizeof(mreq)) < 0) {
+      ptperr("Failed to join PTP multicast on event socket: %d\n", errno);
+    }
+    if (setsockopt(state->info_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                   &mreq, sizeof(mreq)) < 0) {
+      ptperr("Failed to join PTP multicast on info socket: %d\n", errno);
+    }
+
+    /* Allow address reuse so multiple sockets can bind to the same port */
+    int reuse = 1;
+    setsockopt(state->event_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    setsockopt(state->info_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    /* Bind event socket to port 319 */
+    bind_addr.sin_port = htons(PTP_UDP_PORT_EVENT);
+    if (bind(state->event_socket, (struct sockaddr *)&bind_addr,
+             sizeof(bind_addr)) < 0) {
+      ptperr("Failed to bind event socket to port %d: %d\n",
+             PTP_UDP_PORT_EVENT, errno);
+    }
+
+    /* Bind info socket to port 320 */
+    bind_addr.sin_port = htons(PTP_UDP_PORT_INFO);
+    if (bind(state->info_socket, (struct sockaddr *)&bind_addr,
+             sizeof(bind_addr)) < 0) {
+      ptperr("Failed to bind info socket to port %d: %d\n",
+             PTP_UDP_PORT_INFO, errno);
+    }
+
+    /* Bind TX socket to local interface address */
+    bind_addr.sin_addr = state->interface_addr.sin_addr;
+    bind_addr.sin_port = 0;  /* Any port */
+    bind(state->tx_socket, (struct sockaddr *)&bind_addr, sizeof(bind_addr));
+
+    /* Set multicast TTL */
+    int ttl = 64;
+    setsockopt(state->tx_socket, IPPROTO_IP, IP_MULTICAST_TTL,
+               &ttl, sizeof(ttl));
+
+    ptpinfo("UDP PTP sockets ready (event:%d, info:%d, tx:%d)\n",
+            state->event_socket, state->info_socket, state->tx_socket);
+  }
 
   s_state = state;
   return OK;
@@ -1915,7 +1994,7 @@ static int ptp_daemon(int argc, FAR char** argv)
   FAR const char *interface = "eth0";
   FAR struct ptp_state_s *state;
 #ifdef ESP_PTP
-  struct pollfd pollfds[1]; // everything is received over one socket at L2
+  struct pollfd pollfds[3]; /* L2 TAP + UDP event (319) + UDP info (320) */
 #else
   struct pollfd pollfds[2];
   struct msghdr rxhdr;
@@ -1961,11 +2040,15 @@ static int ptp_daemon(int argc, FAR char** argv)
 
   pollfds[0].events = POLLIN;
 #ifdef ESP_PTP
-  /* Poll both L2 TAP (for HW timestamps) and UDP event socket (for
-   * interoperability with devices that send PTP over UDP/IPv4). */
+  /* Poll L2 TAP (for HW timestamps) and UDP event socket (for
+   * interoperability with devices that send PTP over UDP/IPv4).
+   * The info socket (port 320) is also polled for announce and
+   * follow-up messages. */
   pollfds[0].fd = state->ptp_socket;
   pollfds[1].events = POLLIN;
   pollfds[1].fd = state->event_socket;
+  pollfds[2].events = POLLIN;
+  pollfds[2].fd = state->info_socket;
 #else
   pollfds[0].fd = state->event_socket;
   pollfds[1].events = POLLIN;
@@ -1990,7 +2073,12 @@ static int ptp_daemon(int argc, FAR char** argv)
 
       pollfds[0].revents = 0;
       pollfds[1].revents = 0;
+#ifdef ESP_PTP
+      pollfds[2].revents = 0;
+      ret = poll(pollfds, 3, PTPD_POLL_INTERVAL);
+#else
       ret = poll(pollfds, 2, PTPD_POLL_INTERVAL);
+#endif
 
       if (pollfds[0].revents)
         {
@@ -2016,10 +2104,24 @@ static int ptp_daemon(int argc, FAR char** argv)
 #ifdef ESP_PTP
       if (pollfds[1].revents)
         {
-          /* Receive PTP packet from UDP event socket (for AES67
-           * interoperability with devices that send PTP over IPv4). */
+          /* Receive PTP packet from UDP event socket (port 319:
+           * sync, delay_req - time-critical). */
 
           ret = recv(state->event_socket, &state->rxbuf, sizeof(state->rxbuf),
+                    MSG_DONTWAIT);
+          if (ret > 0)
+            {
+              ptp_gettime(state, &state->rxtime);
+              ptp_process_rx_packet(state, ret);
+            }
+        }
+
+      if (pollfds[2].revents)
+        {
+          /* Receive PTP packet from UDP info socket (port 320:
+           * announce, follow_up, delay_resp - non-time-critical). */
+
+          ret = recv(state->info_socket, &state->rxbuf, sizeof(state->rxbuf),
                     MSG_DONTWAIT);
           if (ret > 0)
             {

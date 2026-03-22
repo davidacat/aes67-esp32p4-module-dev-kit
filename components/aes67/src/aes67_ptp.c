@@ -175,7 +175,11 @@ static void ptp_monitor_task(void *arg)
 
             if (!ctx->is_grandmaster) {
                 ctx->is_grandmaster = true;
-                ESP_LOGI(TAG, "This node is PTP grandmaster");
+                ESP_LOGI(TAG, "This node is PTP grandmaster "
+                         "(GM ID: %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X)",
+                         ctx->own_mac[0], ctx->own_mac[1], ctx->own_mac[2],
+                         0xFF, 0xFE,
+                         ctx->own_mac[3], ctx->own_mac[4], ctx->own_mac[5]);
             }
 
             /* When acting as grandmaster, we are always "locked" to our own clock */
@@ -191,7 +195,12 @@ static void ptp_monitor_task(void *arg)
         } else {
             if (ctx->is_grandmaster) {
                 ctx->is_grandmaster = false;
-                ESP_LOGI(TAG, "External grandmaster detected, switching to slave mode");
+                ESP_LOGI(TAG, "External grandmaster detected, switching to slave mode "
+                         "(GM ID: %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X)",
+                         ctx->grandmaster_id[0], ctx->grandmaster_id[1],
+                         ctx->grandmaster_id[2], ctx->grandmaster_id[3],
+                         ctx->grandmaster_id[4], ctx->grandmaster_id[5],
+                         ctx->grandmaster_id[6], ctx->grandmaster_id[7]);
             }
 
             /* Run lock state machine for slave mode */

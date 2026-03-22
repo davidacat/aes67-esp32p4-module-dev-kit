@@ -390,8 +390,14 @@ esp_err_t aes67_session_add_sink(aes67_session_handle_t handle,
 
     xSemaphoreGive(mgr->lock);
 
-    ESP_LOGI(TAG, "sink '%s' added (id=%d, channels=%d, rate=%lu)",
-             name, slot, sdp.channels, (unsigned long)sdp.sample_rate);
+    ESP_LOGI(TAG, "sink '%s' added (id=%d, %s/%luHz/%dch, wl=%d, ptime=%uus, "
+             "mcast=%s:%u, pt=%u)",
+             name, slot,
+             aes67_codec_to_str(sdp.codec),
+             (unsigned long)sdp.sample_rate, sdp.channels, sdp.word_length,
+             sdp.ptime_us,
+             sdp.session_name, sdp.port, sdp.payload_type);
+    ESP_LOGI(TAG, "sink SDP:\n%s", sdp_text);
     return ESP_OK;
 }
 

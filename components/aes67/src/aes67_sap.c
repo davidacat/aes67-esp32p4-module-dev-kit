@@ -390,9 +390,16 @@ esp_err_t aes67_sap_start(aes67_sap_handle_t handle)
         return ESP_FAIL;
     }
 
-    /* Join the SAP multicast group */
+    /* Get local IP first so we can bind multicast to the correct interface */
+    uint32_t local_ip = 0;
+    aes67_net_get_local_ip(&local_ip);
+    char local_ip_str[16];
+    aes67_net_u32_to_ip(local_ip, local_ip_str, sizeof(local_ip_str));
+
+    /* Join the SAP multicast group on the local interface (not INADDR_ANY) */
     esp_err_t err = aes67_net_join_multicast(handle->sock,
-                                              AES67_SAP_MCAST_ADDR, NULL);
+                                              AES67_SAP_MCAST_ADDR,
+                                              local_ip_str);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to join SAP multicast group");
         close(handle->sock);
@@ -403,10 +410,13 @@ esp_err_t aes67_sap_start(aes67_sap_handle_t handle)
     /* RFC 2974 requires SAP packets to have TTL=255 */
     aes67_net_set_multicast_ttl(handle->sock, 255);
 
+    /* Disable multicast loopback so we don't receive our own announcements */
+    int loop = 0;
+    setsockopt(handle->sock, IPPROTO_IP, IP_MULTICAST_LOOP,
+               &loop, sizeof(loop));
+
     /* Set the outgoing multicast interface to our local IP so packets
      * go out via Ethernet, not a random interface */
-    uint32_t local_ip = 0;
-    aes67_net_get_local_ip(&local_ip);
     struct in_addr mcast_if = { .s_addr = local_ip };
     setsockopt(handle->sock, IPPROTO_IP, IP_MULTICAST_IF,
                &mcast_if, sizeof(mcast_if));

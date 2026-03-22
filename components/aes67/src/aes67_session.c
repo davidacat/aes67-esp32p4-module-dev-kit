@@ -254,17 +254,20 @@ esp_err_t aes67_session_add_source(aes67_session_handle_t handle,
         return err;
     }
 
-    /* SAP announcement if enabled. Use CRC16 of the SDP text as
-     * the message ID hash, matching the Linux daemon convention. */
-    if (mgr->config.sap_enabled && mgr->sap) {
-        uint16_t msg_crc = 0xFFFF;
-        for (int i = 0; i < sdp_len; i++) {
-            msg_crc ^= (uint8_t)sdp_text[i];
-            for (int b = 0; b < 8; b++) {
-                if (msg_crc & 1) msg_crc = (msg_crc >> 1) ^ 0xA001;
-                else msg_crc >>= 1;
-            }
+    /* Compute CRC16 of the SDP text as the SAP message ID hash,
+     * matching the Linux daemon convention. Always compute so we can
+     * store it for later use during SAP delete. */
+    uint16_t msg_crc = 0xFFFF;
+    for (int i = 0; i < sdp_len; i++) {
+        msg_crc ^= (uint8_t)sdp_text[i];
+        for (int b = 0; b < 8; b++) {
+            if (msg_crc & 1) msg_crc = (msg_crc >> 1) ^ 0xA001;
+            else msg_crc >>= 1;
         }
+    }
+
+    /* SAP announcement if enabled */
+    if (mgr->config.sap_enabled && mgr->sap) {
         err = aes67_sap_announce(mgr->sap, msg_crc,
                                  local_ip, sdp_text);
         if (err != ESP_OK) {
@@ -282,6 +285,7 @@ esp_err_t aes67_session_add_source(aes67_session_handle_t handle,
     memcpy(&src->rtp_config, &rtp_cfg, sizeof(rtp_cfg));
     memcpy(&src->sdp, &sdp, sizeof(sdp));
     src->rtp_stream = rtp_stream;
+    src->sap_msg_id = msg_crc;
     src->enabled = true;
 
     mgr->source_count++;
@@ -418,7 +422,7 @@ esp_err_t aes67_session_remove_source(aes67_session_handle_t handle, uint8_t id)
         int len = aes67_sdp_generate(&src->sdp, sdp_text, sizeof(sdp_text));
         if (len > 0) {
             esp_err_t err = aes67_sap_delete(mgr->sap,
-                                             (uint16_t)src->sdp.session_id,
+                                             src->sap_msg_id,
                                              local_ip, sdp_text);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "SAP delete failed for source %d: %s",

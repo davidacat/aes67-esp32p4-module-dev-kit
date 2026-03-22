@@ -190,15 +190,19 @@ static uint32_t compute_samples_per_packet(uint32_t sample_rate,
 static esp_err_t stream_alloc_buffers(struct aes67_rtp_stream *stream,
                                       bool use_psram)
 {
-    uint32_t frame_size = stream->config.channels * stream->config.word_length;
-    uint32_t packet_bytes = stream->samples_per_packet * frame_size;
     uint32_t buf_size;
 
     if (stream->direction == AES67_STREAM_SINK) {
-        /* Jitter buffer: 4x packet size for network jitter tolerance */
+        /* Sink ring buffer stores int32_t samples (4 bytes each) regardless
+         * of the wire word length. Jitter buffer: 4x packet size. */
+        uint32_t frame_size = stream->config.channels * sizeof(int32_t);
+        uint32_t packet_bytes = stream->samples_per_packet * frame_size;
         buf_size = packet_bytes * AES67_JITTER_BUF_MULT;
     } else {
-        /* Source TX buffer: 4x packet size for buffering */
+        /* Source TX buffer stores int32_t samples (4 bytes each).
+         * The convert-to-net step packs them into word_length on send. */
+        uint32_t frame_size = stream->config.channels * sizeof(int32_t);
+        uint32_t packet_bytes = stream->samples_per_packet * frame_size;
         buf_size = packet_bytes * AES67_JITTER_BUF_MULT;
     }
 
@@ -383,10 +387,11 @@ static void rx_task_func(void *arg)
 
         aes67_convert_from_net(payload, sample_buf, frames, channels, wl);
 
-        /* Write converted samples into the jitter ring buffer.
-         * Store as raw bytes matching the stream word length per channel. */
-        uint32_t data_bytes = frames * channels * wl;
-        uint32_t written = ringbuf_write(&stream->ring, (const uint8_t *)payload,
+        /* Write converted int32_t samples into the jitter ring buffer.
+         * Each sample is stored as a full int32_t regardless of wire format. */
+        uint32_t data_bytes = frames * channels * sizeof(int32_t);
+        uint32_t written = ringbuf_write(&stream->ring,
+                                         (const uint8_t *)sample_buf,
                                          data_bytes);
         if (written < data_bytes) {
             stream->status.status_flags |= AES67_RTP_STATUS_OVERFLOW;
@@ -706,8 +711,9 @@ esp_err_t aes67_rtp_source_write(aes67_rtp_stream_handle_t stream,
         return ESP_ERR_INVALID_STATE;
     }
 
-    uint32_t byte_count = frame_count * stream->config.channels *
-                          stream->config.word_length;
+    /* Caller provides int32_t samples (left-justified). Store 4 bytes per
+     * sample in the ring buffer regardless of the wire word_length. */
+    uint32_t byte_count = frame_count * stream->config.channels * sizeof(int32_t);
     uint32_t written = ringbuf_write(&stream->ring, (const uint8_t *)samples,
                                      byte_count);
     if (written < byte_count) {
@@ -728,8 +734,8 @@ esp_err_t aes67_rtp_sink_read(aes67_rtp_stream_handle_t stream,
         return ESP_ERR_INVALID_ARG;
     }
 
-    uint32_t byte_count = frame_count * stream->config.channels *
-                          stream->config.word_length;
+    /* Ring buffer stores int32_t samples (4 bytes each) */
+    uint32_t byte_count = frame_count * stream->config.channels * sizeof(int32_t);
 
     /* If stream is muted, return silence */
     if (stream->status.status_flags & AES67_RTP_STATUS_MUTED) {
@@ -777,8 +783,10 @@ esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,
             continue;
         }
 
-        uint32_t frame_size = s->config.channels * s->config.word_length;
-        uint32_t needed_bytes = s->samples_per_packet * frame_size;
+        /* Ring buffer stores int32_t samples (4 bytes each, native endian).
+         * Read them into a temp area, then convert to packed network order. */
+        uint32_t samples_total = s->samples_per_packet * s->config.channels;
+        uint32_t needed_bytes = samples_total * sizeof(int32_t);
 
         /* Check if we have enough data in the ring buffer */
         uint32_t avail = ringbuf_available(&s->ring);
@@ -787,72 +795,50 @@ esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,
             continue;
         }
 
-        /* Read raw samples from ring buffer into the packet payload area */
         uint8_t *pkt = s->tx_packet_buf;
         uint8_t *payload = pkt + AES67_RTP_HEADER_SIZE;
 
-        /* Read native-format samples from ring buffer into a temporary area,
-         * then convert to network byte order in the payload */
-        uint32_t read_bytes = ringbuf_read(&s->ring, payload, needed_bytes);
-        if (read_bytes < needed_bytes) {
-            s->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
-            continue;
+        /* The payload area is sized for packed wire format. We need a
+         * temporary buffer for the int32_t samples read from the ring.
+         * Use the payload area (which is at least as large) plus some
+         * extra stack space if needed. For safety, use a heap buffer
+         * that the stream already has - the payload area is
+         * samples_per_packet * channels * word_length bytes, while we
+         * need samples_per_packet * channels * 4 bytes. When word_length < 4,
+         * the payload area is too small. Use a small stack buffer. */
+        int32_t sample_buf[CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 48];
+        uint32_t frames = s->samples_per_packet;
+        uint8_t channels = s->config.channels;
+        uint8_t wl = s->config.word_length;
+
+        /* Process in chunks if samples_per_packet exceeds our stack buffer */
+        uint32_t chunk_frames = sizeof(sample_buf) / (channels * sizeof(int32_t));
+        uint32_t frames_done = 0;
+        uint8_t *payload_ptr = payload;
+
+        while (frames_done < frames) {
+            uint32_t batch = frames - frames_done;
+            if (batch > chunk_frames) batch = chunk_frames;
+
+            uint32_t batch_bytes = batch * channels * sizeof(int32_t);
+            uint32_t read_bytes = ringbuf_read(&s->ring,
+                                               (uint8_t *)sample_buf,
+                                               batch_bytes);
+            if (read_bytes < batch_bytes) {
+                s->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
+                break;
+            }
+
+            /* Convert int32_t native samples to packed big-endian wire format */
+            aes67_convert_to_net(sample_buf, payload_ptr,
+                                 batch, channels, wl);
+
+            payload_ptr += batch * channels * wl;
+            frames_done += batch;
         }
 
-        /* Convert in-place is not safe; use a temp copy.
-         * The payload area has room, so we read into it, then convert
-         * from a stack copy. For embedded, we limit stack usage by
-         * processing in the payload buffer with a small temp. */
-        /* Actually, we need to convert from native int32_t (in ring buf)
-         * to packed network format. The ring buffer stores raw bytes at
-         * stream word_length, which is already in native format.
-         * We need to convert to big-endian packed format. */
-
-        /* The ring buffer stores native-endian packed samples.
-         * For L16: 2 bytes/sample native endian
-         * For L24: 3 bytes/sample native endian
-         * For L32: 4 bytes/sample native endian
-         *
-         * The convert functions expect int32_t input (left-justified).
-         * Since source_write takes raw samples at word_length, we
-         * need to handle the conversion differently.
-         *
-         * For simplicity and correctness, we convert using the
-         * aes67_convert_to_net function which takes int32_t input.
-         * This means the ring buffer should store int32_t samples
-         * (4 bytes per sample regardless of word_length).
-         *
-         * However, the API says samples are "at the stream's word length".
-         * So we store packed native samples and need to expand them
-         * before converting. For now, treat ring buffer as storing
-         * packed native-endian samples and do byte-swap to network order.
-         */
-
-        /* For L16/L24/L32: the data in the ring buffer is already in
-         * native format at the configured word length. We need to
-         * byte-swap each sample to big-endian for the RTP payload. */
-        uint8_t wl = s->config.word_length;
-        uint32_t total_samples = s->samples_per_packet * s->config.channels;
-
-        /* In-place byte swap from native (little-endian) to network (big-endian) */
-        for (uint32_t j = 0; j < total_samples; j++) {
-            uint8_t *sample = payload + j * wl;
-            if (wl == 2) {
-                uint8_t tmp = sample[0];
-                sample[0] = sample[1];
-                sample[1] = tmp;
-            } else if (wl == 3) {
-                uint8_t tmp = sample[0];
-                sample[0] = sample[2];
-                sample[2] = tmp;
-            } else if (wl == 4) {
-                uint8_t tmp0 = sample[0];
-                uint8_t tmp1 = sample[1];
-                sample[0] = sample[3];
-                sample[1] = sample[2];
-                sample[2] = tmp1;
-                sample[3] = tmp0;
-            }
+        if (frames_done < frames) {
+            continue;
         }
 
         /* Build RTP header */

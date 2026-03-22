@@ -105,17 +105,18 @@ int aes67_sdp_generate(const aes67_sdp_t *sdp, char *buf, size_t buf_len)
         "v=0\r\n"
         "o=%s %" PRIu32 " %" PRIu32 " IN IP4 %s\r\n"
         "s=%s\r\n"
-        "c=IN IP4 %s/32\r\n"
+        "c=IN IP4 %s/%u\r\n"
         "t=0 0\r\n"
         "m=audio %u RTP/AVP %u\r\n"
         "i=Channels 1-%u\r\n"
         "a=sync-time:0\r\n"
         "a=framecount:%" PRIu32 "\r\n"
         "a=rtpmap:%u %s/%" PRIu32 "/%u\r\n"
-        "a=ptime:%s\r\n",
+        "a=ptime:%s\r\n"
+        "a=recvonly\r\n",
         username, sdp->session_id, sdp->session_version, origin_ip_str,
         sdp->session_name,
-        conn_ip_str,
+        conn_ip_str, sdp->ttl,
         sdp->port, sdp->payload_type,
         sdp->channels,
         framecount,

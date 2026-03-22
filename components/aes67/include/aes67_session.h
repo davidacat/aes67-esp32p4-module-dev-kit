@@ -29,6 +29,7 @@ typedef struct {
     aes67_rtp_stream_config_t rtp_config;
     aes67_sdp_t sdp;
     aes67_rtp_stream_handle_t rtp_stream;
+    uint16_t sap_msg_id;    /* CRC16 hash used for SAP announce/delete matching */
     bool enabled;
 } aes67_source_t;
 

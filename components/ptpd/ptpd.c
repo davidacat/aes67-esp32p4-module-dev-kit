@@ -2033,6 +2033,13 @@ static int ptp_daemon(int argc, FAR char** argv)
 
       state->selected_source_valid = is_selected_source_valid(state);
       ptp_process_statusreq(state);
+
+#ifdef ESP_PTP
+      /* Yield to lower-priority tasks (IDLE watchdog) after each iteration.
+       * poll() may return immediately if the L2 TAP socket has pending events,
+       * which would otherwise starve the IDLE task and trigger the watchdog. */
+      vTaskDelay(1);
+#endif
     }
   ptp_destroy_state(state);
   free(state);

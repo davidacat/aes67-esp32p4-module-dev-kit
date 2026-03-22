@@ -50,6 +50,9 @@ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
+# Task watchdog - PTPD dual-transport sends need more headroom
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
 # Partition - use larger app partition since we have plenty of flash
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 

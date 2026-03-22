@@ -13,11 +13,15 @@
 #include "aes67_sap.h"
 #include "aes67_audio.h"
 #include "aes67_session.h"
+#include "aes67_hw_timer.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
 #include "esp_event.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "aes67";
 
@@ -28,6 +32,9 @@ extern void aes67_mdns_deinit(void);
 /* Define the event base for the ESP event loop */
 ESP_EVENT_DEFINE_BASE(AES67_EVENT);
 
+/* Semaphore signaled by the hardware PTP timer ISR */
+static SemaphoreHandle_t s_frame_sem = NULL;
+
 /* Internal node structure holding all subsystem handles */
 struct aes67_node {
     aes67_config_t              config;
@@ -36,24 +43,61 @@ struct aes67_node {
     aes67_sap_handle_t          sap;
     aes67_audio_handle_t        audio;
     aes67_session_handle_t      session;
+    TaskHandle_t                tx_task;
     bool                        running;
 };
 
+/* Global node pointer for the ISR callback (single instance) */
+static aes67_node_handle_t s_node = NULL;
+
 /*
- * Audio frame callback (TIC). Called from the audio driver's DMA ISR context
- * once per frame period. Derives an RTP timestamp from the current PTP time
- * and triggers packet transmission for all active source streams.
+ * Hardware PTP timer ISR callback. Fires at exact PTP-clock-aligned
+ * audio frame boundaries. Gives the semaphore to wake the TX task.
+ */
+static void IRAM_ATTR hw_frame_isr(void *user_data)
+{
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(s_frame_sem, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+/*
+ * RTP TX task. Waits on the hardware frame semaphore and processes
+ * transmit for all active source streams. Runs at high priority
+ * on core 0 for minimal latency from ISR to packet send.
+ */
+static void rtp_tx_task(void *arg)
+{
+    aes67_node_handle_t node = (aes67_node_handle_t)arg;
+
+    ESP_LOGI(TAG, "RTP TX task started (PTP hw-timed)");
+
+    while (node->running) {
+        /* Wait for the hardware frame timer ISR */
+        if (xSemaphoreTake(s_frame_sem, pdMS_TO_TICKS(10)) == pdTRUE) {
+            uint64_t ptp_time_ns;
+            aes67_ptp_get_time_ns(node->ptp, &ptp_time_ns);
+
+            uint32_t rtp_ts = aes67_ptp_time_to_rtp_ts(
+                ptp_time_ns, node->config.audio.sample_rate);
+            aes67_rtp_engine_process_tx(node->rtp, rtp_ts);
+        }
+    }
+
+    ESP_LOGI(TAG, "RTP TX task stopped");
+    vTaskDelete(NULL);
+}
+
+/*
+ * Audio frame callback from I2S DMA. Still used for capture ring buffer
+ * management, but RTP TX is now driven by the hardware PTP timer.
  */
 static void audio_frame_callback(uint32_t frame_count, void *user_data)
 {
-    aes67_node_handle_t node = (aes67_node_handle_t)user_data;
-
-    uint64_t ptp_time_ns;
-    aes67_ptp_get_time_ns(node->ptp, &ptp_time_ns);
-
-    uint32_t rtp_ts = aes67_ptp_time_to_rtp_ts(ptp_time_ns,
-                                                 node->config.audio.sample_rate);
-    aes67_rtp_engine_process_tx(node->rtp, rtp_ts);
+    /* I2S DMA callback - capture data is handled by the audio driver.
+     * RTP TX is now driven by hw_frame_isr -> rtp_tx_task instead. */
 }
 
 esp_err_t aes67_node_init(const aes67_config_t *config, aes67_node_handle_t *handle)
@@ -118,7 +162,7 @@ esp_err_t aes67_node_init(const aes67_config_t *config, aes67_node_handle_t *han
         goto fail_session;
     }
 
-    /* 6. Register the audio frame callback that drives RTP TX timing */
+    /* 6. Register the audio frame callback (for I2S DMA capture handling) */
     ret = aes67_audio_register_frame_cb(node->audio, audio_frame_callback, node);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "audio frame callback registration failed: %s",
@@ -126,6 +170,28 @@ esp_err_t aes67_node_init(const aes67_config_t *config, aes67_node_handle_t *han
         goto fail_cb;
     }
 
+    /* 7. Initialize hardware PTP frame timer for RTP TX.
+     * frame_period = samples_per_packet / sample_rate in nanoseconds */
+    uint32_t samples_per_pkt = (node->config.audio.sample_rate *
+                                 node->config.audio.packet_time_us) / 1000000;
+    uint32_t frame_ns = (uint32_t)((uint64_t)samples_per_pkt * 1000000000ULL /
+                                    node->config.audio.sample_rate);
+
+    /* Create the frame semaphore for ISR -> task signaling */
+    s_frame_sem = xSemaphoreCreateBinary();
+    if (!s_frame_sem) {
+        ESP_LOGE(TAG, "failed to create frame semaphore");
+        goto fail_cb;
+    }
+
+    ret = aes67_hw_timer_init(frame_ns, hw_frame_isr, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "hw PTP timer init failed: %s (falling back to I2S timing)",
+                 esp_err_to_name(ret));
+        /* Non-fatal: I2S DMA callback still works as fallback */
+    }
+
+    s_node = node;
     node->running = false;
     *handle = node;
 
@@ -210,6 +276,26 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
     }
 
     handle->running = true;
+
+    /* Start the hardware PTP frame timer and TX processing task */
+    ret = aes67_hw_timer_start();
+    if (ret == ESP_OK) {
+        BaseType_t xret = xTaskCreatePinnedToCore(
+            rtp_tx_task, "aes67_tx", 4096, handle,
+            21,     /* High priority, just below audio I/O (22) */
+            &handle->tx_task,
+            0       /* Pin to core 0 (PTP/network core) */
+        );
+        if (xret != pdPASS) {
+            ESP_LOGW(TAG, "failed to create TX task");
+            aes67_hw_timer_stop();
+        } else {
+            ESP_LOGI(TAG, "RTP TX driven by hardware PTP timer");
+        }
+    } else {
+        ESP_LOGW(TAG, "hw timer start failed, RTP TX via I2S DMA callback");
+    }
+
     ESP_LOGI(TAG, "node started");
 
     return ESP_OK;

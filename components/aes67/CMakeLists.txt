@@ -10,6 +10,7 @@ idf_component_register(
         "src/aes67_convert.c"
         "src/aes67_net.c"
         "src/aes67_mdns.c"
+        "src/aes67_hw_timer.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS

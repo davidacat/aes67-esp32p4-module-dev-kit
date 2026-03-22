@@ -836,26 +836,6 @@ esp_err_t aes67_rtp_sink_read(aes67_rtp_stream_handle_t stream,
 
     uint32_t avail = ringbuf_available(&stream->ring);
     if (avail < byte_count) {
-        /* Buffer underrun: repeat last frame (packet loss concealment).
-         * This sounds much better than silence - masks single-packet drops. */
-        if (stream->last_rx_time_us > 0 && avail > 0) {
-            /* Read whatever is available */
-            uint32_t partial = (avail / (stream->config.channels * sizeof(int32_t)))
-                               * stream->config.channels * sizeof(int32_t);
-            if (partial > 0) {
-                ringbuf_read(&stream->ring, (uint8_t *)samples, partial);
-                /* Fill the rest by repeating the last frame */
-                uint32_t frame_bytes = stream->config.channels * sizeof(int32_t);
-                uint8_t *last_frame = (uint8_t *)samples + partial - frame_bytes;
-                uint8_t *dst = (uint8_t *)samples + partial;
-                while (dst + frame_bytes <= (uint8_t *)samples + byte_count) {
-                    memcpy(dst, last_frame, frame_bytes);
-                    dst += frame_bytes;
-                }
-                stream->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
-                return ESP_OK;
-            }
-        }
         memset(samples, 0, byte_count);
         stream->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
         return ESP_ERR_NOT_FOUND;

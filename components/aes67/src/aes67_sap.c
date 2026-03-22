@@ -34,7 +34,7 @@ static const char *TAG = "aes67_sap";
 #define SAP_MAX_LOCAL         8
 #define SAP_MAX_REMOTE        16
 
-#define SAP_RX_TASK_STACK     4096
+#define SAP_RX_TASK_STACK     6144
 #define SAP_TX_TASK_STACK     4096
 #define SAP_RX_TASK_PRIO      5
 #define SAP_TX_TASK_PRIO      4
@@ -266,7 +266,15 @@ static void expire_remote_sources(struct aes67_sap_ctx *ctx)
 static void sap_rx_task(void *arg)
 {
     struct aes67_sap_ctx *ctx = (struct aes67_sap_ctx *)arg;
-    uint8_t rx_buf[SAP_RX_BUF_SIZE];
+
+    /* Allocate RX buffer on heap to avoid stack overflow. select() and
+     * the newlib printf internals consume significant stack space. */
+    uint8_t *rx_buf = malloc(SAP_RX_BUF_SIZE);
+    if (!rx_buf) {
+        ESP_LOGE(TAG, "Failed to allocate SAP RX buffer");
+        vTaskDelete(NULL);
+        return;
+    }
 
     ESP_LOGI(TAG, "SAP RX task started");
 
@@ -298,6 +306,7 @@ static void sap_rx_task(void *arg)
         expire_remote_sources(ctx);
     }
 
+    free(rx_buf);
     ESP_LOGI(TAG, "SAP RX task stopped");
     vTaskDelete(NULL);
 }

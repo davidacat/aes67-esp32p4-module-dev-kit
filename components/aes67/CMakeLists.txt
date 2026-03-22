@@ -24,4 +24,5 @@ idf_component_register(
         esp_psram
         ptpd
         esp_eth_time
+        esp_netif
 )

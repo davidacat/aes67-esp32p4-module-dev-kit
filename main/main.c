@@ -130,8 +130,15 @@ static esp_err_t ethernet_init(esp_eth_handle_t *out_eth_handle)
         return ret;
     }
 
-    /* Attach a TCP/IP netif to the Ethernet driver */
-    esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
+    /* Create the netif with key "ETH_0" so the L2 TAP interface used by
+     * ptpd can find it. The default ESP_NETIF_DEFAULT_ETH uses "ETH_DEF"
+     * which does not match what ptpd_start("ETH_0") expects. */
+    esp_netif_inherent_config_t base_cfg = ESP_NETIF_INHERENT_DEFAULT_ETH();
+    base_cfg.if_key = "ETH_0";
+    esp_netif_config_t netif_config = {
+        .base = &base_cfg,
+        .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH,
+    };
     esp_netif_t *eth_netif = esp_netif_new(&netif_config);
     if (!eth_netif) {
         ESP_LOGE(TAG, "failed to create ethernet netif");

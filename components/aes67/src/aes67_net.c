@@ -133,7 +133,7 @@ bool aes67_net_is_multicast(uint32_t ip)
 
 esp_err_t aes67_net_get_local_ip(uint32_t *ip)
 {
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("ETH_DEF");
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("ETH_0");
     if (!netif) {
         ESP_LOGE(TAG, "no ethernet netif found");
         return ESP_ERR_NOT_FOUND;
@@ -151,7 +151,7 @@ esp_err_t aes67_net_get_local_ip(uint32_t *ip)
 
 esp_err_t aes67_net_get_local_mac(uint8_t mac[6])
 {
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("ETH_DEF");
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("ETH_0");
     if (!netif) {
         return ESP_ERR_NOT_FOUND;
     }

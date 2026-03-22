@@ -306,17 +306,25 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio_config->sample_rate),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bit_width, slot_mode),
-        .gpio_cfg = {
-            .mclk = pins->mck_gpio,
-            .bclk = pins->bck_gpio,
-            .ws   = pins->ws_gpio,
-            .dout = pins->dout_gpio,
-            .din  = pins->din_gpio,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv   = false,
-            },
+    };
+
+    /* For 24-bit audio the MCLK multiple must be divisible by 3.
+     * The default (256) is not, so use 384 = 256 * 1.5 which works
+     * for both 16-bit and 24-bit. */
+    if (audio_config->word_length == 3) {
+        std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
+    }
+
+    std_cfg.gpio_cfg = (i2s_std_gpio_config_t){
+        .mclk = pins->mck_gpio,
+        .bclk = pins->bck_gpio,
+        .ws   = pins->ws_gpio,
+        .dout = pins->dout_gpio,
+        .din  = pins->din_gpio,
+        .invert_flags = {
+            .mclk_inv = false,
+            .bclk_inv = false,
+            .ws_inv   = false,
         },
     };
 

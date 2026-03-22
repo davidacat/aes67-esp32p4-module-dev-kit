@@ -28,11 +28,12 @@ static const char *TAG = "aes67_ptp";
 #define PTP_MONITOR_INTERVAL_MS     500
 #define PTP_MONITOR_STACK_SIZE      4096
 #define PTP_MONITOR_PRIORITY        5
-#define PTP_INTERFACE_NAME          "ETH_DEF"
+#define PTP_INTERFACE_NAME          "ETH_0"
 
 /* PTP daemon and clock APIs from local components */
 #include "ptpd.h"
 #include "esp_eth_time.h"
+#include "esp_vfs_l2tap.h"
 
 /* -------------------------------------------------------------------
  * Internal context
@@ -138,6 +139,9 @@ static void ptp_monitor_task(void *arg)
         }
 
         memset(&status, 0, sizeof(status));
+        if (ctx->ptpd_pid < 0) {
+            continue;
+        }
         int ret = ptpd_status(ctx->ptpd_pid, &status);
         if (ret != 0) {
             ESP_LOGD(TAG, "ptpd_status returned %d, daemon may still be initializing", ret);
@@ -227,11 +231,22 @@ esp_err_t aes67_ptp_init(esp_eth_handle_t eth_handle, const aes67_ptp_config_t *
      * The EUI-64 GM ID is derived by inserting FF:FE into the MAC. */
     esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, ctx->own_mac);
 
+    /* Register the L2 TAP VFS interface. The ptpd component opens
+     * /dev/net/tap for Layer 2 PTP packet transport with hardware
+     * timestamping. This must happen before ptpd_start(). */
+    esp_err_t ret = esp_vfs_l2tap_intf_register(NULL);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        /* ESP_ERR_INVALID_STATE means already registered, which is fine */
+        ESP_LOGE(TAG, "esp_vfs_l2tap_intf_register failed: %s", esp_err_to_name(ret));
+        free(ctx);
+        return ret;
+    }
+
     /* Initialize the hardware PTP clock tied to the EMAC */
     esp_eth_clock_cfg_t clk_cfg = {
         .eth_hndl = eth_handle,
     };
-    esp_err_t ret = esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
+    ret = esp_eth_clock_init(CLOCK_PTP_SYSTEM, &clk_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_eth_clock_init failed: %s", esp_err_to_name(ret));
         free(ctx);
@@ -248,7 +263,9 @@ esp_err_t aes67_ptp_start(aes67_ptp_handle_t handle)
     ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
     ESP_RETURN_ON_FALSE(!handle->running, ESP_ERR_INVALID_STATE, TAG, "PTP already running");
 
-    /* Start the ptpd daemon on the default ethernet interface */
+    /* Start the ptpd daemon. The interface name passed here must match
+     * what the ESP netif was created with. For default ethernet config
+     * this is typically "ETH_DEF". */
     int pid = ptpd_start(PTP_INTERFACE_NAME);
     if (pid < 0) {
         ESP_LOGE(TAG, "ptpd_start failed (returned %d)", pid);

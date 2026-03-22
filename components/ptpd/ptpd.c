@@ -164,21 +164,21 @@ struct ptp_state_s
   int64_t last_offset_ns;
 
   pi_cntrl_t offset_pi;
-#else
+#endif // ESP_PTP
+
   /* Address of network interface we are operating on */
 
   struct sockaddr_in interface_addr;
 
-  /* Socket bound to interface for transmission */
+  /* Socket bound to interface for transmission (UDP) */
 
   int tx_socket;
 
-  /* Sockets for PTP event and information ports */
+  /* Sockets for PTP event and information ports (UDP) */
 
   int event_socket;
 
   int info_socket;
-#endif // ESP_PTP
 
   /* Our own identity as a clock source */
 
@@ -789,7 +789,7 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   /* Subscribe to PTP multicast address */
 
   bind_addr.sin_family = AF_INET;
-  bind_addr.sin_addr.s_addr = HTONL(PTP_MULTICAST_ADDR);
+  bind_addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
 
   clock_gettime(CLOCK_MONOTONIC, &state->last_received_multicast);
 
@@ -804,7 +804,7 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
 
   /* Bind socket for events */
 
-  bind_addr.sin_port = HTONS(PTP_UDP_PORT_EVENT);
+  bind_addr.sin_port = htons(PTP_UDP_PORT_EVENT);
   ret = bind(state->event_socket, (struct sockaddr *)&bind_addr,
              sizeof(bind_addr));
   if (ret < 0)
@@ -828,7 +828,7 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
 
   /* Bind socket for announcements */
 
-  bind_addr.sin_port = HTONS(PTP_UDP_PORT_INFO);
+  bind_addr.sin_port = htons(PTP_UDP_PORT_INFO);
   ret = bind(state->info_socket, (struct sockaddr *)&bind_addr,
              sizeof(bind_addr));
   if (ret < 0)
@@ -878,7 +878,7 @@ static int ptp_destroy_state(FAR struct ptp_state_s *state)
 #else
   struct in_addr mcast_addr;
 
-  mcast_addr.s_addr = HTONL(PTP_MULTICAST_ADDR);
+  mcast_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
   ipmsfilter(&state->interface_addr.sin_addr,
               &mcast_addr,
               MCAST_EXCLUDE);
@@ -927,7 +927,7 @@ static int ptp_check_multicast_status(FAR struct ptp_state_s *state)
 
       state->last_received_multicast = time_now;
 
-      mcast_addr.s_addr = HTONL(PTP_MULTICAST_ADDR);
+      mcast_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
       ipmsfilter(&state->interface_addr.sin_addr,
                  &mcast_addr,
                  MCAST_EXCLUDE);
@@ -958,8 +958,8 @@ static int ptp_send_announce(FAR struct ptp_state_s *state)
 
 #ifndef ESP_PTP
   addr.sin_family      = AF_INET;
-  addr.sin_addr.s_addr = HTONL(PTP_MULTICAST_ADDR);
-  addr.sin_port        = HTONS(PTP_UDP_PORT_INFO);
+  addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+  addr.sin_port        = htons(PTP_UDP_PORT_INFO);
 #endif // !ESP_PTP
 
   memset(&msg, 0, sizeof(msg));
@@ -972,7 +972,18 @@ static int ptp_send_announce(FAR struct ptp_state_s *state)
   timespec_to_ptp_format(&ts, msg.origintimestamp);
 
 #ifdef ESP_PTP
+  /* Send via L2 TAP for hardware timestamped transport */
   ret = ptp_net_send(state, &msg, sizeof(msg), NULL);
+
+  /* Also send via UDP for interoperability with standard PTP/AES67 devices */
+  {
+    struct sockaddr_in udp_addr;
+    udp_addr.sin_family      = AF_INET;
+    udp_addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+    udp_addr.sin_port        = htons(PTP_UDP_PORT_INFO);
+    sendto(state->tx_socket, &msg, sizeof(msg), 0,
+           (struct sockaddr *)&udp_addr, sizeof(udp_addr));
+  }
 #else
   ret = sendto(state->tx_socket, &msg, sizeof(msg), 0,
     (struct sockaddr *)&addr, sizeof(addr));
@@ -1014,8 +1025,8 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
   memset(&txiov, 0, sizeof(txiov));
 
   addr.sin_family      = AF_INET;
-  addr.sin_addr.s_addr = HTONL(PTP_MULTICAST_ADDR);
-  addr.sin_port        = HTONS(PTP_UDP_PORT_EVENT);
+  addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+  addr.sin_port        = htons(PTP_UDP_PORT_EVENT);
 #endif // !ESP_PTP
 
   memset(&msg, 0, sizeof(msg));
@@ -1046,6 +1057,16 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
 
 #ifdef ESP_PTP
   ret = ptp_net_send(state, &msg, sizeof(msg), &ts);
+
+  /* Also send sync via UDP for AES67 interoperability */
+  {
+    struct sockaddr_in udp_addr;
+    udp_addr.sin_family      = AF_INET;
+    udp_addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+    udp_addr.sin_port        = htons(PTP_UDP_PORT_EVENT);
+    sendto(state->tx_socket, &msg, sizeof(msg), 0,
+           (struct sockaddr *)&udp_addr, sizeof(udp_addr));
+  }
 #else
   ret = sendmsg(state->tx_socket, &txhdr, 0);
 #endif // ESP_PTP
@@ -1067,14 +1088,24 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
   timespec_to_ptp_format(&ts, msg.origintimestamp);
   msg.header.messagetype = PTP_MSGTYPE_FOLLOW_UP;
   msg.header.flags[0] = 0;
-#ifndef ESP_PTP
-  addr.sin_port = HTONS(PTP_UDP_PORT_INFO);
+#ifdef ESP_PTP
+  ret = ptp_net_send(state, &msg, sizeof(msg), NULL);
+
+  /* Also send follow-up via UDP */
+  {
+    struct sockaddr_in udp_addr;
+    udp_addr.sin_family      = AF_INET;
+    udp_addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+    udp_addr.sin_port        = htons(PTP_UDP_PORT_INFO);
+    sendto(state->tx_socket, &msg, sizeof(msg), 0,
+           (struct sockaddr *)&udp_addr, sizeof(udp_addr));
+  }
+#else
+  addr.sin_port = htons(PTP_UDP_PORT_INFO);
 
   ret = sendto(state->tx_socket, &msg, sizeof(msg), 0,
                (struct sockaddr *)&addr, sizeof(addr));
-#else
-  ret = ptp_net_send(state, &msg, sizeof(msg), NULL);
-#endif // !ESP_PTP
+#endif // ESP_PTP
   if (ret < 0)
     {
       ptperr("sendto for follow-up message failed: %d\n", errno);
@@ -1103,8 +1134,8 @@ static int ptp_send_delay_req(FAR struct ptp_state_s *state)
 
 #ifndef ESP_PTP
   addr.sin_family      = AF_INET;
-  addr.sin_addr.s_addr = HTONL(PTP_MULTICAST_ADDR);
-  addr.sin_port        = HTONS(PTP_UDP_PORT_EVENT);
+  addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+  addr.sin_port        = htons(PTP_UDP_PORT_EVENT);
 #endif // !ESP_PTP
 
   memset(&req, 0, sizeof(req));
@@ -1118,18 +1149,26 @@ static int ptp_send_delay_req(FAR struct ptp_state_s *state)
 
 #ifdef ESP_PTP
   ret = ptp_net_send(state, &req, sizeof(req), &state->delayreq_time);
+
+  /* Also send delay_req via UDP */
+  {
+    struct sockaddr_in udp_addr;
+    udp_addr.sin_family      = AF_INET;
+    udp_addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+    udp_addr.sin_port        = htons(PTP_UDP_PORT_EVENT);
+    sendto(state->tx_socket, &req, sizeof(req), 0,
+           (struct sockaddr *)&udp_addr, sizeof(udp_addr));
+  }
 #else
   ret = sendto(state->tx_socket, &req, sizeof(req), 0,
                (FAR struct sockaddr *)&addr, sizeof(addr));
-#endif // ESP_PTP
 
-#ifndef ESP_PTP
   /* Get timestamp after send completes.
    * TODO: Implement SO_TIMESTAMPING and use the actual tx timestamp here.
    */
 
   ptp_gettime(state, &state->delayreq_time);
-#endif // !ESP_PTP
+#endif // ESP_PTP
 
   if (ret < 0)
     {
@@ -1561,8 +1600,8 @@ static int ptp_process_delay_req(FAR struct ptp_state_s *state,
 
 #ifndef ESP_PTP
   addr.sin_family      = AF_INET;
-  addr.sin_addr.s_addr = HTONL(PTP_MULTICAST_ADDR);
-  addr.sin_port        = HTONS(PTP_UDP_PORT_INFO);
+  addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+  addr.sin_port        = htons(PTP_UDP_PORT_INFO);
 #endif // !ESP_PTP
 
   memset(&resp, 0, sizeof(resp));
@@ -1580,6 +1619,16 @@ static int ptp_process_delay_req(FAR struct ptp_state_s *state,
 
 #ifdef ESP_PTP
   ret = ptp_net_send(state, &resp, sizeof(resp), NULL);
+
+  /* Also send delay_resp via UDP */
+  {
+    struct sockaddr_in udp_addr;
+    udp_addr.sin_family      = AF_INET;
+    udp_addr.sin_addr.s_addr = htonl(PTP_MULTICAST_ADDR);
+    udp_addr.sin_port        = htons(PTP_UDP_PORT_INFO);
+    sendto(state->tx_socket, &resp, sizeof(resp), 0,
+           (struct sockaddr *)&udp_addr, sizeof(udp_addr));
+  }
 #else
   ret = sendto(state->tx_socket, &resp, sizeof(resp), 0,
                (FAR struct sockaddr *)&addr, sizeof(addr));
@@ -1894,7 +1943,11 @@ static int ptp_daemon(int argc, FAR char** argv)
 
   pollfds[0].events = POLLIN;
 #ifdef ESP_PTP
+  /* Poll both L2 TAP (for HW timestamps) and UDP event socket (for
+   * interoperability with devices that send PTP over UDP/IPv4). */
   pollfds[0].fd = state->ptp_socket;
+  pollfds[1].events = POLLIN;
+  pollfds[1].fd = state->event_socket;
 #else
   pollfds[0].fd = state->event_socket;
   pollfds[1].events = POLLIN;
@@ -1918,12 +1971,8 @@ static int ptp_daemon(int argc, FAR char** argv)
 #endif // !ESP_PTP
 
       pollfds[0].revents = 0;
-#ifndef ESP_PTP
       pollfds[1].revents = 0;
       ret = poll(pollfds, 2, PTPD_POLL_INTERVAL);
-#else
-	  ret = poll(pollfds, 1, PTPD_POLL_INTERVAL);
-#endif // !ESP_PTP
 
       if (pollfds[0].revents)
         {
@@ -1946,7 +1995,21 @@ static int ptp_daemon(int argc, FAR char** argv)
             }
         }
 
-#ifndef ESP_PTP
+#ifdef ESP_PTP
+      if (pollfds[1].revents)
+        {
+          /* Receive PTP packet from UDP event socket (for AES67
+           * interoperability with devices that send PTP over IPv4). */
+
+          ret = recv(state->event_socket, &state->rxbuf, sizeof(state->rxbuf),
+                    MSG_DONTWAIT);
+          if (ret > 0)
+            {
+              ptp_gettime(state, &state->rxtime);
+              ptp_process_rx_packet(state, ret);
+            }
+        }
+#else
       if (pollfds[1].revents)
         {
           /* Receive non-time-critical packet. */

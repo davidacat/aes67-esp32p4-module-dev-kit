@@ -57,15 +57,22 @@ IRAM_ATTR static bool hw_timer_isr(esp_eth_mediator_t *eth, void *user_args)
     /* Schedule the next target time */
     timespec_add_ns(&s_timer.next_time, s_timer.frame_period_ns);
 
-    /* Verify the next time is still in the future. If we missed a
-     * frame (ISR was delayed), skip ahead to the next valid slot. */
+    /* Verify the next time is still in the future. If we're behind
+     * (e.g., after a PTP clock jump), re-anchor to now + one period
+     * instead of looping to catch up (which would hang the ISR). */
     struct timespec now;
     esp_eth_clock_gettime(CLOCK_PTP_SYSTEM, &now);
 
-    while (s_timer.next_time.tv_sec < now.tv_sec ||
-           (s_timer.next_time.tv_sec == now.tv_sec &&
-            s_timer.next_time.tv_nsec <= now.tv_nsec)) {
-        timespec_add_ns(&s_timer.next_time, s_timer.frame_period_ns);
+    int64_t diff_ns = ((int64_t)s_timer.next_time.tv_sec - now.tv_sec) * 1000000000LL
+                    + (s_timer.next_time.tv_nsec - now.tv_nsec);
+
+    if (diff_ns <= 0) {
+        /* We're behind - re-anchor to next aligned boundary from now */
+        uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec;
+        uint64_t period = s_timer.frame_period_ns;
+        uint64_t next_ns = ((now_ns / period) + 1) * period;
+        s_timer.next_time.tv_sec = (time_t)(next_ns / 1000000000ULL);
+        s_timer.next_time.tv_nsec = (long)(next_ns % 1000000000ULL);
     }
 
     esp_eth_clock_set_target_time(CLOCK_PTP_SYSTEM, &s_timer.next_time);

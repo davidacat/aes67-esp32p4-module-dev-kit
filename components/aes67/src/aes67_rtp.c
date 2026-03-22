@@ -427,23 +427,11 @@ static void rx_task_func(void *arg)
             stream->status.status_flags |= AES67_RTP_STATUS_OVERFLOW;
         }
 
-        /* Write directly to I2S for immediate playback.
-         * i2s_channel_write blocks until DMA accepts the data. */
-        if (engine->i2s_playback_enabled && frames > 0) {
-            extern esp_err_t aes67_audio_direct_write(
-                void *handle, const int32_t *samples, uint32_t frame_count);
-            esp_err_t wr_err = aes67_audio_direct_write(
-                engine->audio_handle, sample_buf, frames);
-            if (wr_err != ESP_OK) {
-                static uint32_t i2s_write_errors = 0;
-                i2s_write_errors++;
-                if (i2s_write_errors <= 3 || (i2s_write_errors % 100) == 0) {
-                    ESP_LOGW(TAG, "I2S write failed (%lu total): %s",
-                             (unsigned long)i2s_write_errors,
-                             esp_err_to_name(wr_err));
-                }
-            }
-        }
+        /* Playback is handled by a separate task that drains the
+         * jitter ring buffer. We must NOT call i2s_channel_write here
+         * because it blocks for ~1ms, causing recvfrom to miss packets.
+         * The ring buffer write above stores the data for the playback
+         * task to consume. */
 
         /* Periodic stats every 1000 packets (~4 seconds) */
         if (stream->status.packets_received > 0 &&

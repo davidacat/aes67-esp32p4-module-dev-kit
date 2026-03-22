@@ -21,10 +21,9 @@ static const char *TAG = "aes67_audio";
 #define AUDIO_IO_TASK_STACK     (4096)
 #define AUDIO_IO_TASK_PRIORITY  (22)
 
-/* I2S DMA descriptor count - more descriptors = deeper DMA FIFO = fewer underruns.
- * Each descriptor holds dma_frame_num frames. With 8 descriptors at 64 frames
- * each = 512 frames = ~10.7ms of buffer at 48kHz. */
-#define DMA_DESC_NUM            8
+/* I2S DMA descriptor count. 16 descriptors at 192 frames each = 3072 frames
+ * = 64ms of buffer at 48kHz. Large buffer reduces per-write overhead. */
+#define DMA_DESC_NUM            16
 
 /* Timeout for I2S read/write operations (ms) */
 #define I2S_IO_TIMEOUT_MS       100
@@ -63,14 +62,14 @@ struct aes67_audio_ctx {
 
 /* --- Helpers --------------------------------------------------------------- */
 
-/* Always use 32-bit I2S data width for maximum DMA throughput.
- * Our internal format is int32 and the ES8311 supports 32-bit slots.
- * Using 24-bit mode causes the I2S driver to do extra bit manipulation
- * that limits throughput to ~32kHz instead of 48kHz. */
 static i2s_data_bit_width_t word_length_to_bits(uint8_t word_length)
 {
-    (void)word_length;
-    return I2S_DATA_BIT_WIDTH_32BIT;
+    switch (word_length) {
+    case 2:  return I2S_DATA_BIT_WIDTH_16BIT;
+    case 3:  return I2S_DATA_BIT_WIDTH_24BIT;
+    case 4:  return I2S_DATA_BIT_WIDTH_32BIT;
+    default: return I2S_DATA_BIT_WIDTH_24BIT;
+    }
 }
 
 /* In ESP32-P4 Philips I2S mode with 32-bit slot width, the DMA data
@@ -279,7 +278,8 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     /* --- Configure I2S channels --- */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
-    chan_cfg.dma_frame_num = ctx->frame_size;
+    chan_cfg.dma_frame_num = 192;  /* Match playback write chunk size */
+    chan_cfg.auto_clear = true;    /* Clear DMA buffer on underflow (silence) */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {

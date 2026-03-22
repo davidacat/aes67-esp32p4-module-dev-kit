@@ -278,7 +278,7 @@ static esp_err_t es8311_codec_init(void)
         .sample_frequency = 48000,
     };
 
-    ret = es8311_init(codec, &clk_cfg, ES8311_RESOLUTION_32, ES8311_RESOLUTION_32);
+    ret = es8311_init(codec, &clk_cfg, ES8311_RESOLUTION_24, ES8311_RESOLUTION_24);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ES8311 init failed: %s", esp_err_to_name(ret));
         return ret;

@@ -192,45 +192,27 @@ static void playback_task(void *arg)
             continue;
         }
 
-        /* Sample-hold: when stream buffer has a full packet, use it.
-         * When empty, repeat last good frame -- no silence gaps. */
+        /* Non-blocking read with sample-repeat. With APLL the rate matches
+         * perfectly so holds are rare (~2% from lwIP overhead only). */
         int16_t pcm_buf[192 * 2];
-        static int16_t hold_buf[192 * 2];
-        static bool have_hold = false;
+        static int16_t last_buf[192 * 2];
+        static bool have_data = false;
         uint32_t frames;
 
         size_t avail = xStreamBufferBytesAvailable(sbuf);
         if (avail >= 768) {
-            /* Full packet ready -- read and update hold buffer */
             xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
+            memcpy(last_buf, pcm_buf, 768);
+            have_data = true;
             frames = 192;
-            memcpy(hold_buf, pcm_buf, 768);
-            have_hold = true;
-        } else if (have_hold) {
-            /* No new data -- fade the held frame toward silence.
-             * Each repeat reduces amplitude by 50%, so after 4 repeats
-             * (~16ms) the output is nearly silent. Much less audible
-             * than repeating the same waveform as a 250Hz buzz. */
-            for (int i = 0; i < 192 * 2; i++) {
-                hold_buf[i] = hold_buf[i] / 2;
-            }
-            memcpy(pcm_buf, hold_buf, 768);
+        } else if (have_data) {
+            /* Repeat last frame -- with APLL clock this is rare and
+             * a clean repeat is less audible than silence or fade */
+            memcpy(pcm_buf, last_buf, 768);
             frames = 192;
         } else {
-            /* Wait for stream buffer to fill to 50% before starting.
-             * This gives ~128ms of headroom to absorb the ~10% rate
-             * deficit from lwIP per-packet overhead. */
-            size_t avail_init = xStreamBufferBytesAvailable(sbuf);
-            if (avail_init < 24576) {  /* Wait for ~128ms of data */
-                vTaskDelay(pdMS_TO_TICKS(10));
-                continue;
-            }
-            if (xStreamBufferReceive(sbuf, pcm_buf, 768, 0) < 768) continue;
-            frames = 192;
-            memcpy(hold_buf, pcm_buf, 768);
-            have_hold = true;
-            ESP_LOGI(TAG, "PB: initial fill %u bytes, starting playback",
-                     (unsigned)avail_init);
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
         }
 
         /* Write int16 directly to I2S */

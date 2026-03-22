@@ -73,6 +73,7 @@
 #ifdef ESP_PTP
 #include "ptpd.h"
 #include "esp_netif.h"
+#include "esp_eth_mac_esp.h"
 #include "esp_eth_driver.h"
 #include "esp_vfs_l2tap.h"
 #include "semaphore.h"
@@ -667,12 +668,11 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
 
-  /* PI controller gains for frequency lock. Higher values = slower response
-   * but more stable. With 1s sync interval on ESP32-P4:
-   * kp=4 means apply 25% of offset as proportional correction
-   * ki=32 means integrate 1/32 of offset per cycle */
-  state->offset_pi.kp = 4;
-  state->offset_pi.ki = 32;
+  /* PI controller gains for ppb-based frequency lock.
+   * kp=16: apply 1/16 of offset as proportional correction
+   * ki=64: integrate 1/64 of offset per cycle (slow, stable) */
+  state->offset_pi.kp = 16;
+  state->offset_pi.ki = 64;
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;
@@ -1377,63 +1377,59 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
                                   FAR struct timespec *remote_timestamp,
                                   FAR struct timespec *local_timestamp)
 {
-  // Compute how off we are against master
+  /* Compute clock offset against master */
   int64_t offset_ns = timespec_delta_ns(remote_timestamp, local_timestamp);
   offset_ns += state->path_delay_ns;
-  // TODO add offset filter
 
-  // Execute PI controller to elimitate the offset
-  // compute I component
-  state->offset_pi.drift_acc += offset_ns / state->offset_pi.ki;
-  // clamp the accumulator to ADJ_FREQ_MAX for sanity
-  if (state->offset_pi.drift_acc > ADJ_FREQ_MAX){
-    state->offset_pi.drift_acc = ADJ_FREQ_MAX;
-  } else if (state->offset_pi.drift_acc < -ADJ_FREQ_MAX) {
-    state->offset_pi.drift_acc = -ADJ_FREQ_MAX;
+  /* PI controller: compute correction in ppb.
+   * P term: proportional to current offset
+   * I term: accumulated drift estimate */
+  state->offset_pi.drift_acc += (int32_t)(offset_ns / state->offset_pi.ki);
+
+  /* Clamp I term to prevent windup (max 100 ppm drift correction) */
+  int32_t max_drift = 100000; /* 100 ppm in ppb */
+  if (state->offset_pi.drift_acc > max_drift) {
+    state->offset_pi.drift_acc = max_drift;
+  } else if (state->offset_pi.drift_acc < -max_drift) {
+    state->offset_pi.drift_acc = -max_drift;
   }
-  // compute P component and the whole controller
-  int32_t adj = offset_ns / state->offset_pi.kp + state->offset_pi.drift_acc;
 
-  /* Compute frequency difference between slave and master over the sync
-   * period. On the first call after init or a clock step, skip the
-   * frequency adjustment since the previous timestamps are invalid. */
+  /* Compute the total ppb adjustment. The PI output is in nanoseconds of
+   * correction needed per sync interval. Convert to ppb (ns/s = ppb). */
+  int32_t p_term = (int32_t)(offset_ns / state->offset_pi.kp);
+  int32_t adj_ppb = p_term + state->offset_pi.drift_acc;
+
+  /* Clamp total adjustment to +/- 500 ppm */
+  if (adj_ppb > 500000) adj_ppb = 500000;
+  if (adj_ppb < -500000) adj_ppb = -500000;
+
+  /* Use the ppb-based API which is idempotent: it always computes the
+   * new addend relative to the stored base addend, avoiding the
+   * compounding problem of the freq_scale API. */
+  esp_eth_handle_t eth_handle;
+  if (ioctl(state->ptp_socket, L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) == 0) {
+    esp_eth_ioctl(eth_handle, ETH_MAC_ESP_CMD_ADJ_PTP_TIME, &adj_ppb);
+  }
+
+  /* Track timestamps for drift measurement */
   int64_t remote_time_ns = timespec_to_ns(remote_timestamp);
   int64_t local_time_ns = timespec_to_ns(local_timestamp);
 
   if (state->remote_time_ns_prev != 0 && state->local_time_ns_prev != 0) {
-    int64_t remote_delta_ns = remote_time_ns - state->remote_time_ns_prev;
     int64_t local_delta_ns = local_time_ns - state->local_time_ns_prev;
-
-    /* Sanity check: deltas should be roughly 1 sync interval (not huge) */
-    if (local_delta_ns > 0 && local_delta_ns < 5000000000LL &&
-        remote_delta_ns > 0 && remote_delta_ns < 5000000000LL) {
+    int64_t remote_delta_ns = remote_time_ns - state->remote_time_ns_prev;
+    if (local_delta_ns > 0 && local_delta_ns < 5000000000LL) {
       int64_t tick_diff = remote_delta_ns - local_delta_ns;
-
-      double freq_scale = ((double)(remote_delta_ns + adj)) / (double)local_delta_ns;
-
-      /* Clamp freq_scale to prevent runaway adjustments */
-      if (freq_scale > 1.001) freq_scale = 1.001;
-      if (freq_scale < 0.999) freq_scale = 0.999;
-
-      esp_eth_clock_adj_param_t clk_adj_param = {
-        .mode = ETH_CLK_ADJ_FREQ_SCALE,
-        .freq_scale = freq_scale
-      };
-      esp_eth_clock_adjtime(CLOCK_PTP_SYSTEM, &clk_adj_param);
-
-      /* Expose live values through ptpd_status() */
-      if (local_delta_ns > 0) {
-        state->drift_ppb = (long)((tick_diff * 1000000000LL) / local_delta_ns);
-      }
+      state->drift_ppb = (long)((tick_diff * 1000000000LL) / local_delta_ns);
     }
   }
 
   state->remote_time_ns_prev = remote_time_ns;
   state->local_time_ns_prev = local_time_ns;
-
   state->last_delta_ns = offset_ns;
 
-  ESP_LOGD(TAG, "offset_ns %lli, adj %li, drift_acc %li", offset_ns, adj, state->offset_pi.drift_acc);
+  ESP_LOGD(TAG, "offset %+lld ns, p=%+ld, i=%+ld, adj=%+ld ppb",
+           offset_ns, (long)p_term, (long)state->offset_pi.drift_acc, (long)adj_ppb);
 
   // Get the path delay only when clock is stable enough. If we were in process of adjustion (speeding/slowing slave),
   // we would get incorrect delay

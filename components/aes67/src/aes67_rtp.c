@@ -22,6 +22,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/stream_buffer.h"
 
 static const char *TAG = "aes67_rtp";
 
@@ -76,6 +77,8 @@ struct aes67_rtp_engine {
     void *audio_handle;
     /* Task to notify when new sink data arrives */
     TaskHandle_t playback_notify_task;
+    /* Stream buffer for decoupling RTP RX from I2S DMA */
+    StreamBufferHandle_t audio_stream_buf;
 };
 
 /* --- Ring buffer helpers --- */
@@ -330,12 +333,18 @@ static void rx_task_func(void *arg)
 
     ESP_LOGI(TAG, "RX task started on port %u", engine->net_config.rtp_port);
 
+    /* Timing stats for the RTP RX hot path */
+    static int64_t t_recv_total = 0, t_proc_total = 0;
+    static uint32_t t_count = 0;
+
     while (engine->running) {
         struct sockaddr_in src_addr;
         socklen_t addr_len = sizeof(src_addr);
 
+        int64_t t0 = esp_timer_get_time();
         int recv_len = recvfrom(engine->rx_sock, rx_buf, AES67_RX_BUF_SIZE, 0,
                                 (struct sockaddr *)&src_addr, &addr_len);
+        int64_t t1 = esp_timer_get_time();
         if (recv_len < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
@@ -449,15 +458,17 @@ static void rx_task_func(void *arg)
                 sample_buf[f * 2 + 1] = mono;
             }
 
-            /* First 3 packets: buffer to prefill DMA ring (12ms headroom) */
-            if (stream->status.packets_received < 3) {
+            /* First 4 packets: buffer to fill entire DMA ring (16ms).
+             * ALL 4 descriptors must be written -- an unwritten descriptor
+             * plays silence every 16ms, causing periodic crackling. */
+            if (stream->status.packets_received < 4) {
                 uint32_t data_bytes = frames * channels * sizeof(int32_t);
                 ringbuf_write(&stream->ring,
                               (const uint8_t *)sample_buf, data_bytes);
 
-                if (stream->status.packets_received == 2) {
+                if (stream->status.packets_received == 3) {
                     int32_t flush_buf[192 * 2];
-                    for (int p = 0; p < 3; p++) {
+                    for (int p = 0; p < 4; p++) {
                         uint32_t rb = frames * channels * sizeof(int32_t);
                         if (ringbuf_read(&stream->ring, (uint8_t *)flush_buf, rb) == rb) {
                             aes67_audio_direct_write(engine->audio_handle,
@@ -466,9 +477,19 @@ static void rx_task_func(void *arg)
                     }
                 }
             } else {
-                /* Steady state: write directly, DMA blocks if ring full */
-                aes67_audio_direct_write(engine->audio_handle,
-                                          sample_buf, frames);
+                /* Steady state: write int16 to stream buffer.
+                 * Playback task drains it to I2S in a tight loop. */
+                if (engine->audio_stream_buf) {
+                    int16_t i16buf[frames * channels];
+                    for (uint32_t f = 0; f < frames; f++) {
+                        int32_t mono = (sample_buf[f*2] >> 1) + (sample_buf[f*2+1] >> 1);
+                        int16_t s16 = (int16_t)(mono >> 16);
+                        i16buf[f * 2] = s16;
+                        i16buf[f * 2 + 1] = s16;
+                    }
+                    xStreamBufferSend(engine->audio_stream_buf, i16buf,
+                                       frames * channels * sizeof(int16_t), 0);
+                }
             }
         } else {
             /* Non-stereo fallback: jitter buffer */
@@ -479,13 +500,21 @@ static void rx_task_func(void *arg)
 
         stream->status.packets_received++;
 
-        /* Minimal stats every 10000 packets (~40s). Keep log SHORT
-         * to minimize UART blocking time in the audio hot path. */
+        int64_t t2 = esp_timer_get_time();
+        t_recv_total += (t1 - t0);
+        t_proc_total += (t2 - t1);
+        t_count++;
+
         if ((stream->status.packets_received % 10000) == 0) {
-            ESP_LOGI(TAG, "RX: %luk pkts, %lu lost, j=%ldus",
+            ESP_LOGI(TAG, "RX: %luk pkts, %lu lost, j=%ldus | "
+                     "recv=%lldus proc=%lldus cycle=%lldus (avg over %lu)",
                      (unsigned long)(stream->status.packets_received / 1000),
                      (unsigned long)stream->status.packets_lost,
-                     (long)stream->jitter_us);
+                     (long)stream->jitter_us,
+                     t_count > 0 ? (long long)(t_recv_total / t_count) : 0,
+                     t_count > 0 ? (long long)(t_proc_total / t_count) : 0,
+                     t_count > 0 ? (long long)((t_recv_total + t_proc_total) / t_count) : 0,
+                     (unsigned long)t_count);
         }
 
         /* Log first packet only */
@@ -526,6 +555,14 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     engine->rx_task = NULL;
     engine->stream_count = 0;
 
+    /* Stream buffer: 32ms at 48kHz stereo int16 = 6144 bytes.
+     * Trigger at 768 bytes = one full packet (192 frames stereo int16).
+     * This prevents partial reads that cause extra overhead. */
+    engine->audio_stream_buf = xStreamBufferCreate(6144, 768);
+    if (!engine->audio_stream_buf) {
+        ESP_LOGE(TAG, "Failed to create audio stream buffer");
+    }
+
     /* Create the RX socket bound to the RTP port */
     engine->rx_sock = aes67_net_create_udp_socket(net_config->rtp_port, true);
     if (engine->rx_sock < 0) {
@@ -546,6 +583,11 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     ESP_LOGI(TAG, "Engine initialized, RX socket on port %u",
              net_config->rtp_port);
     return ESP_OK;
+}
+
+StreamBufferHandle_t aes67_rtp_engine_get_stream_buf(aes67_rtp_engine_handle_t handle)
+{
+    return handle ? handle->audio_stream_buf : NULL;
 }
 
 void aes67_rtp_engine_set_notify_task(aes67_rtp_engine_handle_t handle,

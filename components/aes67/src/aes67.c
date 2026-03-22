@@ -24,6 +24,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/stream_buffer.h"
 #include "driver/i2s_std.h"
 
 static const char *TAG = "aes67";
@@ -178,28 +179,54 @@ static void playback_task(void *arg)
             }
         }
 
-        /* The direct RTP->staging path handles all audio.
-         * This task just monitors stats. No jitter buffer involvement. */
         if (!prefilled) {
             prefilled = true;
             start_us = esp_timer_get_time();
-            ESP_LOGI(TAG, "Playback: direct RTP->staging mode (no jitter buffer)");
+            ESP_LOGI(TAG, "Playback: stream buffer tight-loop mode");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        /* Get the stream buffer from RTP engine */
+        extern StreamBufferHandle_t aes67_rtp_engine_get_stream_buf(void *h);
+        StreamBufferHandle_t sbuf = aes67_rtp_engine_get_stream_buf(node->rtp);
+        if (!sbuf) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
 
-        extern void aes67_audio_get_staging_stats(
-            void *h, uint32_t *isr_count, uint32_t *underruns);
-        uint32_t isr_cnt = 0, underruns = 0;
-        aes67_audio_get_staging_stats(node->audio, &isr_cnt, &underruns);
-        uint32_t frames = 192;
+        /* Tight loop: read int16 from stream buffer, write to I2S.
+         * i2s_channel_write blocks when DMA is full = 48kHz pacing.
+         * This matches the test tone loop that played perfectly. */
+        extern esp_err_t aes67_audio_direct_write_i16(
+            aes67_audio_handle_t h, const int16_t *samples,
+            uint32_t sample_count);
 
+        int16_t pcm_buf[192 * 2];  /* One packet worth */
+        size_t got = xStreamBufferReceive(sbuf, pcm_buf, sizeof(pcm_buf),
+                                           pdMS_TO_TICKS(50));
+        if (got == 0) continue;
+
+        uint32_t frames = got / (ch * sizeof(int16_t));
+
+        /* Write int16 directly to I2S */
+        {
+            size_t written = 0;
+            extern i2s_chan_handle_t aes67_audio_get_tx_chan(void *h);
+            i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
+            if (tx) {
+                i2s_channel_write(tx, pcm_buf, got, &written, portMAX_DELAY);
+            }
+        }
+
+        total_frames += frames;
         write_count++;
-        if ((write_count % 10) == 0) {  /* Every 5 seconds */
-            ESP_LOGI(TAG, "DMA ISR: %lu calls, %lu underruns (%.1f%%)",
-                     (unsigned long)isr_cnt,
-                     (unsigned long)underruns,
-                     isr_cnt > 0 ? (float)underruns * 100.0f / isr_cnt : 0.0f);
+        if ((write_count % 1000) == 0) {
+            int64_t el = esp_timer_get_time() - start_us;
+            if (el > 0) {
+                ESP_LOGI(TAG, "PB: %lu fps, sb=%u/%u bytes",
+                         (unsigned long)(total_frames * 1000000ULL / el),
+                         (unsigned)xStreamBufferBytesAvailable(sbuf),
+                         (unsigned)xStreamBufferSpacesAvailable(sbuf));
+            }
         }
     }
 
@@ -406,10 +433,10 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
         /* Playback on core 1 at priority 20 (below lwIP 22, above RX 17).
          * lwIP processes packets first, then playback drains the jitter
          * buffer, then RX picks up from the socket. */
-        /* Playback on core 0, prio 20. Woken by RTP RX task notification
-         * when new data arrives -- no polling delay. */
+        /* Playback on core 1 at priority 21 (above RTP RX 17, below lwIP 22).
+         * Was on core 0 where TIC task (prio 21) preempted it every 1ms. */
         xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
-                                20, &pb_task, 0);
+                                21, &pb_task, 1);
 
         /* Register playback task for notification from RTP RX */
         extern void aes67_rtp_engine_set_notify_task(

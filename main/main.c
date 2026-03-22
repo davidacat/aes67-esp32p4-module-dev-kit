@@ -437,25 +437,12 @@ void app_main(void)
     int32_t tone_buf[samples_per_packet * 2];
     uint32_t phase = 0;
 
-    ESP_LOGI(TAG, "node ready -- streaming 1kHz test tone at -6 dBFS");
+    ESP_LOGI(TAG, "node ready (TX source disabled for RX throughput test)");
 
-    /* Drop main task priority below the default so IDLE can run.
-     * The tone generation is not time-critical. */
-    vTaskPrioritySet(NULL, tskIDLE_PRIORITY + 1);
-
+    /* TX test tone disabled: it sends 1000 pkts/sec on port 5004 which
+     * our own recvfrom() receives and must process, stealing ~10% of
+     * the RTP RX task's time from real sink packets. */
     while (1) {
-        /* Fill packet from precomputed LUT (zero float math in loop) */
-        for (uint32_t i = 0; i < samples_per_packet; i++) {
-            int32_t sample = sine_lut[phase];
-            tone_buf[i * 2 + 0] = sample;
-            tone_buf[i * 2 + 1] = sample;
-            phase++;
-            if (phase >= tone_period) phase = 0;
-        }
-
-        aes67_rtp_source_write(src_info.rtp_stream,
-                               tone_buf, samples_per_packet);
-
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

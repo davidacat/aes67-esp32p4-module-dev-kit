@@ -308,8 +308,9 @@ static void sap_rx_task(void *arg)
         }
 
         if (ret > 0 && FD_ISSET(ctx->sock, &rfds)) {
-            int len = recv(ctx->sock, rx_buf, sizeof(rx_buf), 0);
+            int len = recv(ctx->sock, rx_buf, SAP_RX_BUF_SIZE, 0);
             if (len > 0) {
+                ESP_LOGI(TAG, "SAP received %d bytes", len);
                 handle_sap_rx(ctx, rx_buf, len);
             }
         }

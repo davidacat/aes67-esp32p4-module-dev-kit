@@ -196,8 +196,8 @@ static void audio_io_task(void *arg)
         /* 4. Read from playback ring buffer and send to I2S TX */
         playback_ring_to_dma(ctx, ctx->dma_tx_buf, frames_read);
 
-        /* Debug: log first DMA write content */
-        if (frame_counter <= 3) {
+        /* Debug: log DMA write content at startup and after sink connects */
+        if (frame_counter <= 3 || frame_counter == 30000 || frame_counter == 35000) {
             int32_t *dbg = (int32_t *)ctx->dma_tx_buf;
             uint32_t avail = ring_available(ctx->playback_wr, ctx->playback_rd,
                                             ctx->buf_size_frames);

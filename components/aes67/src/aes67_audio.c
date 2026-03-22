@@ -72,18 +72,12 @@ static i2s_data_bit_width_t word_length_to_bits(uint8_t word_length)
     }
 }
 
-/* Bit shift to convert between I2S DMA format and left-justified int32.
- * I2S DMA on ESP32-P4 uses 32-bit slot width. Data sits in the lower bits.
- * Left-justified int32 has the MSB at bit 31. */
-static int bit_shift_for_word_length(uint8_t word_length)
-{
-    switch (word_length) {
-    case 2:  return 16;  /* 16-bit in lower half -> shift left 16 */
-    case 3:  return 8;   /* 24-bit in lower 24  -> shift left 8 */
-    case 4:  return 0;   /* 32-bit, no shift */
-    default: return 8;
-    }
-}
+/* In ESP32-P4 Philips I2S mode with 32-bit slot width, the DMA data
+ * is already left-justified (MSB-first) in the 32-bit word. This means
+ * the I2S DMA format matches our internal left-justified int32 format
+ * directly. No bit shifting is needed regardless of the configured
+ * data bit width (16/24/32), because the I2S hardware handles the
+ * slot-to-wire packing. */
 
 /* Available frames in a ring buffer (single-producer / single-consumer safe) */
 static inline uint32_t ring_available(uint32_t wr, uint32_t rd, uint32_t capacity)
@@ -100,13 +94,12 @@ static inline uint32_t ring_free(uint32_t wr, uint32_t rd, uint32_t capacity)
 
 /* --- DMA <-> Ring Buffer Conversion --------------------------------------- */
 
-/* Convert DMA buffer (32-bit slots, interleaved channels) to left-justified
- * int32_t and write into the capture ring buffer. */
+/* Copy DMA buffer (32-bit slots) directly to capture ring buffer.
+ * Both DMA and ring buffer use left-justified int32 format. */
 static void dma_to_capture_ring(struct aes67_audio_ctx *ctx,
                                 const uint8_t *dma_buf,
                                 uint32_t frame_count)
 {
-    const int shift = bit_shift_for_word_length(ctx->config.word_length);
     const uint8_t ch = ctx->config.channels;
     const uint32_t cap = ctx->buf_size_frames;
     const int32_t *src = (const int32_t *)dma_buf;
@@ -115,20 +108,19 @@ static void dma_to_capture_ring(struct aes67_audio_ctx *ctx,
     for (uint32_t f = 0; f < frame_count; f++) {
         uint32_t ring_idx = (wr % cap) * ch;
         for (uint8_t c = 0; c < ch; c++) {
-            ctx->capture_buf[ring_idx + c] = src[f * ch + c] << shift;
+            ctx->capture_buf[ring_idx + c] = src[f * ch + c];
         }
         wr++;
     }
     ctx->capture_wr = wr;
 }
 
-/* Read from the playback ring buffer, convert to DMA format, and fill the
- * DMA TX buffer. Outputs silence if the ring buffer has insufficient data. */
+/* Read from playback ring buffer and copy to DMA TX buffer.
+ * Both use left-justified int32 format - direct copy, no shifting. */
 static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
                                  uint8_t *dma_buf,
                                  uint32_t frame_count)
 {
-    const int shift = bit_shift_for_word_length(ctx->config.word_length);
     const uint8_t ch = ctx->config.channels;
     const uint32_t cap = ctx->buf_size_frames;
     int32_t *dst = (int32_t *)dma_buf;
@@ -140,12 +132,10 @@ static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
         if (f < avail) {
             uint32_t ring_idx = (rd % cap) * ch;
             for (uint8_t c = 0; c < ch; c++) {
-                /* Right-shift back from left-justified int32 to DMA format */
-                dst[f * ch + c] = ctx->playback_buf[ring_idx + c] >> shift;
+                dst[f * ch + c] = ctx->playback_buf[ring_idx + c];
             }
             rd++;
         } else {
-            /* Underrun: output silence */
             for (uint8_t c = 0; c < ch; c++) {
                 dst[f * ch + c] = 0;
             }
@@ -485,9 +475,11 @@ esp_err_t aes67_audio_write_playback(aes67_audio_handle_t handle,
 
     uint32_t free_frames = ring_free(handle->playback_wr, handle->playback_rd, cap);
     if (frame_count > free_frames) {
-        ESP_LOGD(TAG, "Playback ring full, wanted %lu, free %lu",
-                 (unsigned long)frame_count, (unsigned long)free_frames);
-        return ESP_ERR_NO_MEM;
+        /* Drop oldest frames to make room - prevents stale data looping.
+         * This is preferable to failing the write, which would cause the
+         * I2S to replay old content in a loop (sounds like digital noise). */
+        uint32_t to_drop = frame_count - free_frames;
+        handle->playback_rd += to_drop;
     }
 
     uint32_t wr = handle->playback_wr;

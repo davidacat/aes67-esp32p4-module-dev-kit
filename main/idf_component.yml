@@ -3,3 +3,5 @@ dependencies:
     version: ">=5.5.0"
   espressif/esp-dsp:
     version: "*"
+  espressif/es8311:
+    version: "*"

@@ -34,6 +34,8 @@
 #include "aes67_sap.h"
 #include "aes67_audio.h"
 #include "dsps_tone_gen.h"
+#include "driver/i2c.h"
+#include "es8311.h"
 
 /* Session handle for SAP callback */
 static aes67_session_handle_t s_session = NULL;
@@ -87,6 +89,13 @@ static const char *TAG = "main";
 
 /* Power amplifier enable (active high) */
 #define PA_CTRL_GPIO        53
+
+/* I2C for ES8311 codec control */
+#define I2C_SCL_GPIO        8
+#define I2C_SDA_GPIO        7
+#define I2C_PORT            I2C_NUM_0
+#define I2C_CLK_HZ          100000
+#define ES8311_ADDR         ES8311_ADDRESS_0    /* 0x18, CE pin low */
 
 static EventGroupHandle_t s_eth_event_group;
 
@@ -219,6 +228,72 @@ static void pa_ctrl_enable(void)
     ESP_LOGI(TAG, "PA enabled (GPIO%d high)", PA_CTRL_GPIO);
 }
 
+/*
+ * Initialize the ES8311 audio codec via I2C.
+ * Configures it for 48kHz 24-bit I2S operation with both DAC (playback)
+ * and ADC (capture) enabled.
+ */
+static esp_err_t es8311_codec_init(void)
+{
+    /* Initialize I2C master bus */
+    i2c_config_t i2c_cfg = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_SDA_GPIO,
+        .scl_io_num = I2C_SCL_GPIO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_CLK_HZ,
+    };
+    esp_err_t ret = i2c_param_config(I2C_PORT, &i2c_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C param config failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = i2c_driver_install(I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C driver install failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* Create ES8311 codec handle */
+    es8311_handle_t codec = es8311_create(I2C_PORT, ES8311_ADDR);
+    if (!codec) {
+        ESP_LOGE(TAG, "ES8311 create failed");
+        return ESP_FAIL;
+    }
+
+    /* Configure clock: MCLK from MCLK pin, 48kHz sample rate.
+     * MCLK frequency = sample_rate * mclk_multiple.
+     * We configured I2S with MCLK_MULTIPLE_384, so MCLK = 48000 * 384 = 18.432 MHz */
+    es8311_clock_config_t clk_cfg = {
+        .mclk_inverted = false,
+        .sclk_inverted = false,
+        .mclk_from_mclk_pin = true,
+        .mclk_frequency = 48000 * 384,     /* 18.432 MHz */
+        .sample_frequency = 48000,
+    };
+
+    ret = es8311_init(codec, &clk_cfg, ES8311_RESOLUTION_24, ES8311_RESOLUTION_24);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ES8311 init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* Set output volume (0-100) */
+    ret = es8311_voice_volume_set(codec, 80, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ES8311 volume set failed: %s", esp_err_to_name(ret));
+    }
+
+    /* Configure microphone: analog mic, 24dB gain */
+    es8311_microphone_config(codec, false);
+    es8311_microphone_gain_set(codec, ES8311_MIC_GAIN_24DB);
+
+    ESP_LOGI(TAG, "ES8311 codec initialized (48kHz, 24-bit, vol=80)");
+    return ESP_OK;
+}
+
 void app_main(void)
 {
     /* Initialize NVS -- required by some ESP-IDF components internally */
@@ -251,6 +326,13 @@ void app_main(void)
 
     /* Enable the power amplifier before starting audio */
     pa_ctrl_enable();
+
+    /* Initialize the ES8311 audio codec via I2C */
+    esp_err_t codec_ret = es8311_codec_init();
+    if (codec_ret != ESP_OK) {
+        ESP_LOGW(TAG, "ES8311 codec init failed (audio may not work): %s",
+                 esp_err_to_name(codec_ret));
+    }
 
     /* Build the AES67 node configuration with our I2S pins and codec settings */
     aes67_config_t aes67_cfg = AES67_CONFIG_DEFAULT();

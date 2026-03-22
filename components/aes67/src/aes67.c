@@ -99,12 +99,26 @@ static void audio_frame_task(void *arg)
          * convert to network format, send RTP packets */
         aes67_rtp_engine_process_tx(node->rtp, rtp_ts);
 
-        /* RX: Read from sink jitter buffers and feed to I2S playback.
-         * The audio driver's I/O task still handles the actual I2S DMA
-         * transfers, but we drive the timing from here to keep playback
-         * synchronized with the PTP clock. */
-        /* (Sink playback integration will be added when sink streams
-         * are fully wired up - for now the audio I/O task handles it) */
+        /* RX: Feed sink jitter buffer audio to I2S playback.
+         * Read from the first active sink stream and write to the
+         * audio playback ring buffer for I2S DMA output. */
+        uint32_t spp = (node->config.audio.sample_rate *
+                         node->config.audio.packet_time_us) / 1000000;
+        int32_t playback_buf[CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 48];
+
+        int sink_count = aes67_session_get_sink_count(node->session);
+        for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
+            aes67_sink_t sink;
+            if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
+                sink.enabled && sink.rtp_stream) {
+                esp_err_t read_err = aes67_rtp_sink_read(sink.rtp_stream,
+                                                          playback_buf, spp);
+                if (read_err == ESP_OK) {
+                    aes67_audio_write_playback(node->audio, playback_buf, spp);
+                }
+                break; /* Only play the first active sink for now */
+            }
+        }
     }
 
     ESP_LOGI(TAG, "Audio frame task stopped");
@@ -401,5 +415,16 @@ esp_err_t aes67_node_get_session(aes67_node_handle_t handle,
     }
 
     *session = handle->session;
+    return ESP_OK;
+}
+
+esp_err_t aes67_node_get_sap(aes67_node_handle_t handle,
+                              aes67_sap_handle_t *sap)
+{
+    if (!handle || !sap) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *sap = handle->sap;
     return ESP_OK;
 }

@@ -32,7 +32,37 @@
 #include "aes67_session.h"
 #include "aes67_rtp.h"
 #include "aes67_sap.h"
+#include "aes67_audio.h"
 #include "dsps_tone_gen.h"
+
+/* Session handle for SAP callback */
+static aes67_session_handle_t s_session = NULL;
+static bool s_sink_added = false;
+
+/* SAP discovery callback: auto-subscribe to discovered remote sources */
+static void sap_discovery_cb(bool is_announce,
+                              const aes67_sap_remote_source_t *source,
+                              void *user_data)
+{
+    if (!is_announce || !source || s_sink_added || !s_session) {
+        return;
+    }
+
+    /* Subscribe to the first discovered source as a sink */
+    ESP_LOGI("main", "Auto-subscribing to \"%s\" from SAP", source->name);
+
+    uint8_t sink_id = 0;
+    esp_err_t err = aes67_session_add_sink(s_session, source->name,
+                                            source->sdp, &sink_id);
+    if (err == ESP_OK) {
+        s_sink_added = true;
+        ESP_LOGI("main", "Sink added (id=%u) -- receiving \"%s\"",
+                 sink_id, source->name);
+    } else {
+        ESP_LOGW("main", "Failed to add sink for \"%s\": %s",
+                 source->name, esp_err_to_name(err));
+    }
+}
 
 static const char *TAG = "main";
 
@@ -250,6 +280,19 @@ void app_main(void)
     /* Obtain the session manager handle from the node so we can add streams */
     aes67_session_handle_t session = NULL;
     ESP_ERROR_CHECK(aes67_node_get_session(node, &session));
+    s_session = session;
+
+    /* Register SAP callback to auto-subscribe to discovered sources.
+     * This will add a sink for the first remote source found (e.g. SIENNA). */
+    aes67_sap_handle_t sap = NULL;
+    /* Get SAP handle from the node config - it's stored internally.
+     * For now, register via the session manager's SAP handle. */
+    extern esp_err_t aes67_node_get_sap(aes67_node_handle_t handle,
+                                         aes67_sap_handle_t *sap);
+    if (aes67_node_get_sap(node, &sap) == ESP_OK && sap) {
+        aes67_sap_register_cb(sap, sap_discovery_cb, NULL);
+        ESP_LOGI(TAG, "SAP auto-subscribe enabled");
+    }
 
     /* Create a 2-channel L24 source stream. The session manager generates
      * the SDP and begins SAP announcements automatically. */

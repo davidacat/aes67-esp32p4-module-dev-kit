@@ -30,7 +30,7 @@ static const char *TAG = "aes67_rtp";
 #define AES67_MAX_STREAMS       (CONFIG_AES67_MAX_SOURCES + CONFIG_AES67_MAX_SINKS)
 #define AES67_RX_TASK_STACK     4096
 #define AES67_RX_BUF_SIZE       2048
-#define AES67_JITTER_BUF_MULT   64  /* Large buffer to absorb clock drift between source and local I2S */
+#define AES67_JITTER_BUF_MULT   128 /* Large buffer: 128 * 48 frames = 128ms at 48kHz */
 
 /* Ring buffer for audio data. Single reader, single writer. */
 typedef struct {
@@ -836,7 +836,26 @@ esp_err_t aes67_rtp_sink_read(aes67_rtp_stream_handle_t stream,
 
     uint32_t avail = ringbuf_available(&stream->ring);
     if (avail < byte_count) {
-        /* Buffer underrun: output silence */
+        /* Buffer underrun: repeat last frame (packet loss concealment).
+         * This sounds much better than silence - masks single-packet drops. */
+        if (stream->last_rx_time_us > 0 && avail > 0) {
+            /* Read whatever is available */
+            uint32_t partial = (avail / (stream->config.channels * sizeof(int32_t)))
+                               * stream->config.channels * sizeof(int32_t);
+            if (partial > 0) {
+                ringbuf_read(&stream->ring, (uint8_t *)samples, partial);
+                /* Fill the rest by repeating the last frame */
+                uint32_t frame_bytes = stream->config.channels * sizeof(int32_t);
+                uint8_t *last_frame = (uint8_t *)samples + partial - frame_bytes;
+                uint8_t *dst = (uint8_t *)samples + partial;
+                while (dst + frame_bytes <= (uint8_t *)samples + byte_count) {
+                    memcpy(dst, last_frame, frame_bytes);
+                    dst += frame_bytes;
+                }
+                stream->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
+                return ESP_OK;
+            }
+        }
         memset(samples, 0, byte_count);
         stream->status.status_flags |= AES67_RTP_STATUS_UNDERFLOW;
         return ESP_ERR_NOT_FOUND;

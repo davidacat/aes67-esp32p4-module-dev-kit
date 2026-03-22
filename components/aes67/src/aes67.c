@@ -127,11 +127,9 @@ static void playback_task(void *arg)
 {
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
 
-    /* Read up to 2400 frames (50ms) at a time. Larger batches amortize
-     * the ~0.8ms per-call overhead of i2s_channel_write better.
-     * i2s_channel_write with portMAX_DELAY will block until ALL data
-     * is consumed by the DMA, pacing at exactly 48kHz. */
-    uint32_t max_frames = 2400;
+    /* Read up to 480 frames (10ms) at a time. Balances latency
+     * against i2s_channel_write per-call overhead. */
+    uint32_t max_frames = 480;
     uint32_t spp = 48;  /* minimum read unit */
     int32_t *buf = heap_caps_malloc(max_frames * node->config.audio.channels *
                                      sizeof(int32_t), MALLOC_CAP_INTERNAL);

@@ -30,7 +30,7 @@ static const char *TAG = "aes67_rtp";
 #define AES67_MAX_STREAMS       (CONFIG_AES67_MAX_SOURCES + CONFIG_AES67_MAX_SINKS)
 #define AES67_RX_TASK_STACK     4096
 #define AES67_RX_BUF_SIZE       2048
-#define AES67_JITTER_BUF_MULT   128 /* Large buffer: 128 * 48 frames = 128ms at 48kHz */
+#define AES67_JITTER_BUF_MULT   8   /* 8 * packet_size, ~32ms for 192-frame packets */
 
 /* Ring buffer for audio data. Single reader, single writer. */
 typedef struct {
@@ -517,10 +517,8 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 }; /* 100ms */
     setsockopt(engine->rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    /* Large RX buffer to hold packets while i2s_channel_write blocks.
-     * With 192-frame packets at 1152 bytes each, 128KB holds ~111 packets
-     * = ~444ms of buffered audio. */
-    aes67_net_set_buffers(engine->rx_sock, 0, 131072);
+    /* RX buffer: 32KB holds ~28 packets at 1152 bytes each = ~112ms */
+    aes67_net_set_buffers(engine->rx_sock, 0, 32768);
 
     *handle = engine;
     ESP_LOGI(TAG, "Engine initialized, RX socket on port %u",

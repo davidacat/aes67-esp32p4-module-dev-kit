@@ -209,13 +209,26 @@ esp_err_t aes67_session_add_source(aes67_session_handle_t handle,
     sdp.word_length = word_length;
     sdp.ptime_us = packet_time;
 
-    /* PTP reference clock from current grandmaster */
+    /* PTP reference clock. At stream creation time we may not have
+     * synced to a GM yet, so default to "traceable" which is what
+     * most AES67 devices advertise. The SDP will be re-announced
+     * via SAP periodically, picking up the current GM state. */
+    sdp.has_ptp_refclk = true;
+    sdp.ptp_traceable = true;
+    sdp.ptp_domain = mgr->config.ptp.domain;
+
     aes67_ptp_status_t ptp_status;
-    if (aes67_ptp_get_status(mgr->ptp, &ptp_status) == ESP_OK) {
-        sdp.has_ptp_refclk = true;
-        memcpy(sdp.ptp_grandmaster_id, ptp_status.grandmaster_id, 8);
-        sdp.ptp_domain = ptp_status.domain;
-        sdp.ptp_traceable = (ptp_status.lock_state == AES67_PTP_LOCKED);
+    if (aes67_ptp_get_status(mgr->ptp, &ptp_status) == ESP_OK &&
+        ptp_status.lock_state == AES67_PTP_LOCKED) {
+        /* If we have a locked GM, include its identity */
+        bool gm_valid = false;
+        for (int i = 0; i < 8; i++) {
+            if (ptp_status.grandmaster_id[i] != 0) { gm_valid = true; break; }
+        }
+        if (gm_valid) {
+            memcpy(sdp.ptp_grandmaster_id, ptp_status.grandmaster_id, 8);
+            sdp.ptp_traceable = true;
+        }
     }
 
     /* Media clock offset */

@@ -118,6 +118,22 @@ static void audio_frame_task(void *arg)
                                                               playback_buf, spp);
                     if (read_err == ESP_OK) {
                         aes67_audio_write_playback(node->audio, playback_buf, spp);
+
+                        /* Debug: log first few playback writes */
+                        static int pb_log_count = 0;
+                        if (pb_log_count < 3) {
+                            pb_log_count++;
+                            ESP_LOGI(TAG, "TIC->playback: read %lu frames from sink, "
+                                     "samples[0]=0x%08lx [1]=0x%08lx [2]=0x%08lx [3]=0x%08lx",
+                                     (unsigned long)spp,
+                                     (unsigned long)playback_buf[0],
+                                     (unsigned long)playback_buf[1],
+                                     (unsigned long)playback_buf[2],
+                                     (unsigned long)playback_buf[3]);
+                        }
+                    } else if (frame_count < 5) {
+                        ESP_LOGW(TAG, "TIC: sink_read returned %s",
+                                 esp_err_to_name(read_err));
                     }
                     break;
                 }

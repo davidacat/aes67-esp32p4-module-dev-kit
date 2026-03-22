@@ -419,6 +419,22 @@ static void rx_task_func(void *arg)
         }
 
         stream->status.packets_received++;
+
+        /* Debug: log first few received packets for format verification */
+        if (stream->status.packets_received <= 3) {
+            ESP_LOGI(TAG, "RX pkt #%lu: seq=%u ts=%lu ssrc=0x%08lx pt=%u "
+                     "payload=%lu bytes, %u frames, %u ch, wl=%u. "
+                     "First samples (net): %02x%02x%02x %02x%02x%02x | "
+                     "Converted int32: 0x%08lx 0x%08lx",
+                     (unsigned long)stream->status.packets_received,
+                     hdr.seq, (unsigned long)hdr.timestamp,
+                     (unsigned long)hdr.ssrc, hdr.pt,
+                     (unsigned long)payload_len, frames, channels, wl,
+                     payload[0], payload[1], payload[2],
+                     payload[3], payload[4], payload[5],
+                     (unsigned long)sample_buf[0],
+                     (unsigned long)sample_buf[1]);
+        }
     }
 
     heap_caps_free(sample_buf);

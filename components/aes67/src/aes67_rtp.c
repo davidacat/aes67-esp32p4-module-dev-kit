@@ -19,6 +19,9 @@
 #include <errno.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "lwip/udp.h"
+#include "lwip/pbuf.h"
+#include "lwip/igmp.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -79,6 +82,10 @@ struct aes67_rtp_engine {
     TaskHandle_t playback_notify_task;
     /* Stream buffer for decoupling RTP RX from I2S DMA */
     StreamBufferHandle_t audio_stream_buf;
+    /* Raw lwIP UDP PCB -- processes packets directly in lwIP context,
+     * bypassing socket layer and its ~412us per-packet overhead. */
+    struct udp_pcb *raw_pcb;
+    int32_t *raw_sample_buf;  /* Pre-allocated conversion buffer */
 };
 
 /* --- Ring buffer helpers --- */
@@ -305,6 +312,109 @@ static struct aes67_rtp_stream *find_sink_stream(struct aes67_rtp_engine *engine
     }
 
     return NULL;
+}
+
+/* --- Raw lwIP UDP callback (runs in lwIP task context) --- */
+
+/* Called directly by lwIP when a UDP packet arrives on port 5004.
+ * No socket layer, no message queue, no context switch.
+ * Processes RTP packets with ~10us overhead instead of ~412us. */
+static void raw_udp_recv_cb(void *arg, struct udp_pcb *pcb,
+                             struct pbuf *p, const ip_addr_t *addr, u16_t port)
+{
+    struct aes67_rtp_engine *engine = (struct aes67_rtp_engine *)arg;
+
+    static uint32_t raw_cb_count = 0;
+    static uint32_t raw_cb_processed = 0;
+    raw_cb_count++;
+
+    if (!p || p->tot_len < AES67_RTP_HEADER_SIZE) {
+        if (p) pbuf_free(p);
+        return;
+    }
+
+    /* Copy pbuf chain to contiguous buffer */
+    uint8_t pkt_buf[2048];
+    if (p->tot_len > sizeof(pkt_buf)) {
+        pbuf_free(p);
+        return;
+    }
+    pbuf_copy_partial(p, pkt_buf, p->tot_len, 0);
+    uint16_t recv_len = p->tot_len;
+    pbuf_free(p);
+
+    /* Parse RTP header */
+    aes67_rtp_header_t hdr;
+    if (!rtp_parse_header(pkt_buf, recv_len, &hdr)) {
+        return;
+    }
+
+    /* Skip own TX packets */
+    for (int i = 0; i < AES67_MAX_STREAMS; i++) {
+        struct aes67_rtp_stream *s = engine->streams[i];
+        if (s && s->direction == AES67_STREAM_SOURCE && s->ssrc == hdr.ssrc) {
+            return;
+        }
+    }
+
+    /* Find matching sink stream */
+    struct aes67_rtp_stream *stream = find_sink_stream(engine, hdr.ssrc, NULL);
+    if (!stream) return;
+
+    /* Validate payload type */
+    if (hdr.pt != stream->config.payload_type) return;
+
+    /* Track sequence */
+    uint16_t expected_seq = stream->status.last_seq + 1;
+    if (stream->status.packets_received > 0 && hdr.seq != expected_seq) {
+        int16_t diff = (int16_t)(hdr.seq - expected_seq);
+        if (diff > 0) stream->status.packets_lost += diff;
+        stream->status.seq_errors++;
+    }
+    stream->status.last_seq = hdr.seq;
+    stream->status.packets_received++;
+
+    /* Convert from network format to int32 */
+    const uint8_t *payload = pkt_buf + AES67_RTP_HEADER_SIZE;
+    uint32_t payload_len = recv_len - AES67_RTP_HEADER_SIZE;
+    uint8_t channels = stream->config.channels;
+    uint8_t wl = stream->config.word_length;
+    uint32_t frame_size_bytes = channels * wl;
+    if (frame_size_bytes == 0 || payload_len < frame_size_bytes) return;
+    uint32_t frames = payload_len / frame_size_bytes;
+    if (frames > 192) frames = 192;  /* Clamp to buffer size */
+
+    int32_t *sample_buf = engine->raw_sample_buf;
+    aes67_convert_from_net(payload, sample_buf, frames, channels, wl);
+
+    /* Mono mix + int16 conversion + stream buffer write */
+    if (engine->audio_stream_buf && channels == 2) {
+        int16_t i16buf[frames * channels];
+        for (uint32_t f = 0; f < frames; f++) {
+            int32_t mono = (sample_buf[f*2] >> 1) + (sample_buf[f*2+1] >> 1);
+            int16_t s16 = (int16_t)(mono >> 16);
+            i16buf[f * 2] = s16;
+            i16buf[f * 2 + 1] = s16;
+        }
+        xStreamBufferSend(engine->audio_stream_buf, i16buf,
+                           frames * channels * sizeof(int16_t), 0);
+    }
+
+    raw_cb_processed++;
+
+    /* Log first packet and periodic stats */
+    if (stream->status.packets_received == 1) {
+        const char *codec_str = (wl == 2) ? "L16" : (wl == 3) ? "L24" : "L32";
+        ESP_LOGI(TAG, "RAW RX: %s/%luHz/%uch, %u frames",
+                 codec_str, (unsigned long)stream->config.sample_rate,
+                 channels, frames);
+    }
+    if ((raw_cb_count % 5000) == 0) {
+        ESP_LOGI(TAG, "RAW: cb=%lu proc=%lu lost=%lu",
+                 (unsigned long)raw_cb_count,
+                 (unsigned long)raw_cb_processed,
+                 (unsigned long)stream->status.packets_lost);
+    }
 }
 
 /* --- RX task --- */
@@ -557,21 +667,46 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     engine->rx_task = NULL;
     engine->stream_count = 0;
 
-    /* Stream buffer: 256ms at 48kHz stereo int16 = 49152 bytes.
-     * Large buffer absorbs the ~10% rate deficit from lwIP overhead.
-     * Trigger at 768 bytes = one full packet. */
-    engine->audio_stream_buf = xStreamBufferCreate(49152, 768);
+    /* Stream buffer: 64ms at 48kHz stereo int16 = 12288 bytes. */
+    engine->audio_stream_buf = xStreamBufferCreate(12288, 768);
+
+    /* Raw lwIP UDP PCB -- bypasses socket layer for RTP receive.
+     * Processes packets directly in lwIP callback context. */
+    engine->raw_pcb = udp_new();
+    if (engine->raw_pcb) {
+        err_t err = udp_bind(engine->raw_pcb, IP_ADDR_ANY, net_config->rtp_port);
+        if (err == ERR_OK) {
+            udp_recv(engine->raw_pcb, raw_udp_recv_cb, engine);
+            ESP_LOGI(TAG, "Raw UDP PCB bound to port %u (bypasses socket layer)",
+                     net_config->rtp_port);
+        } else {
+            ESP_LOGW(TAG, "Raw UDP bind failed: %d, falling back to socket", err);
+            udp_remove(engine->raw_pcb);
+            engine->raw_pcb = NULL;
+        }
+    }
+
+    /* Pre-allocate conversion buffer for the raw callback */
+    engine->raw_sample_buf = heap_caps_malloc(
+        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 192 * sizeof(int32_t),
+        MALLOC_CAP_INTERNAL);
     if (!engine->audio_stream_buf) {
         ESP_LOGE(TAG, "Failed to create audio stream buffer");
     }
 
-    /* Create the RX socket bound to the RTP port */
-    engine->rx_sock = aes67_net_create_udp_socket(net_config->rtp_port, true);
-    if (engine->rx_sock < 0) {
-        ESP_LOGE(TAG, "Failed to create RX socket on port %u",
-                 net_config->rtp_port);
-        free(engine);
-        return ESP_FAIL;
+    /* Create the RX socket only if raw PCB is not active.
+     * Raw PCB already binds to the port, so socket bind would fail. */
+    if (!engine->raw_pcb) {
+        engine->rx_sock = aes67_net_create_udp_socket(net_config->rtp_port, true);
+        if (engine->rx_sock < 0) {
+            ESP_LOGE(TAG, "Failed to create RX socket on port %u",
+                     net_config->rtp_port);
+            free(engine);
+            return ESP_FAIL;
+        }
+    } else {
+        /* Still need a socket for TX and multicast joins */
+        engine->rx_sock = aes67_net_create_udp_socket(0, true);  /* Ephemeral port */
     }
 
     /* Set socket receive timeout so the RX task can check the running flag */
@@ -777,11 +912,18 @@ esp_err_t aes67_rtp_stream_add(aes67_rtp_engine_handle_t engine_handle,
         aes67_net_set_multicast_ttl(s->tx_sock, config->ttl);
     }
 
-    /* Sink streams: join multicast group on the RX socket */
+    /* Sink streams: join multicast group */
     if (s->direction == AES67_STREAM_SINK && aes67_net_is_multicast(config->dest_ip)) {
         char mcast_str[16];
         aes67_net_u32_to_ip(config->dest_ip, mcast_str, sizeof(mcast_str));
+        /* Join via socket (for legacy RX task) */
         err = aes67_net_join_multicast(engine->rx_sock, mcast_str, NULL);
+        /* Also join via lwIP IGMP for the raw PCB path */
+        if (engine->raw_pcb) {
+            ip4_addr_t mcast_ip;
+            mcast_ip.addr = config->dest_ip;
+            igmp_joingroup(IP4_ADDR_ANY4, &mcast_ip);
+        }
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Failed to join multicast group %s", mcast_str);
         }

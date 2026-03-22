@@ -406,13 +406,17 @@ void app_main(void)
         }
     }
 
-    /* Create a 2-channel L24 source stream. The session manager generates
-     * the SDP and begins SAP announcements automatically. */
+    /* Source stream disabled while raw UDP PCB occupies port 5004.
+     * TODO: use separate ports for TX and RX, or share the raw PCB. */
     uint8_t source_id = 0;
-    ESP_ERROR_CHECK(aes67_session_add_source(session, "ESP32-P4 AES67",
-                                              2, AES67_CODEC_L24, &source_id));
-
-    ESP_LOGI(TAG, "AES67 source stream active (id=%u, 2ch L24 @ 48kHz)", source_id);
+    esp_err_t src_err = aes67_session_add_source(session, "ESP32-P4 AES67",
+                                                   2, AES67_CODEC_L24, &source_id);
+    if (src_err == ESP_OK) {
+        ESP_LOGI(TAG, "AES67 source stream active (id=%u, 2ch L24 @ 48kHz)", source_id);
+    } else {
+        ESP_LOGW(TAG, "Source stream skipped (port conflict with raw PCB): %s",
+                 esp_err_to_name(src_err));
+    }
 
     aes67_source_t src_info;
     aes67_session_get_source(session, source_id, &src_info);

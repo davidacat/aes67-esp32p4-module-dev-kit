@@ -671,10 +671,12 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   state->local_time_ns_prev = 0;
 
   /* PI controller gains for ppb-based frequency lock.
-   * kp=16: apply 1/16 of offset as proportional correction
-   * ki=64: integrate 1/64 of offset per cycle (slow, stable) */
-  state->offset_pi.kp = 16;
-  state->offset_pi.ki = 64;
+   * These divide offset_ns to produce a ppb adjustment value.
+   * With 1s sync interval and typical crystal drift of 20-50ppm:
+   * kp=200: 1ms offset -> 5000 ppb (5 ppm) proportional correction
+   * ki=2000: 1ms offset -> 500 ppb (0.5 ppm) integral per cycle */
+  state->offset_pi.kp = 200;
+  state->offset_pi.ki = 2000;
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;
@@ -1388,22 +1390,22 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
    * I term: accumulated drift estimate */
   state->offset_pi.drift_acc += (int32_t)(offset_ns / state->offset_pi.ki);
 
-  /* Clamp I term to prevent windup (max 100 ppm drift correction) */
-  int32_t max_drift = 100000; /* 100 ppm in ppb */
+  /* Clamp I term to prevent windup. Real crystal drift is typically
+   * 20-50 ppm, so 50000 ppb (50 ppm) is a generous ceiling. */
+  int32_t max_drift = 50000;
   if (state->offset_pi.drift_acc > max_drift) {
     state->offset_pi.drift_acc = max_drift;
   } else if (state->offset_pi.drift_acc < -max_drift) {
     state->offset_pi.drift_acc = -max_drift;
   }
 
-  /* Compute the total ppb adjustment. The PI output is in nanoseconds of
-   * correction needed per sync interval. Convert to ppb (ns/s = ppb). */
   int32_t p_term = (int32_t)(offset_ns / state->offset_pi.kp);
   int32_t adj_ppb = p_term + state->offset_pi.drift_acc;
 
-  /* Clamp total adjustment to +/- 500 ppm */
-  if (adj_ppb > 500000) adj_ppb = 500000;
-  if (adj_ppb < -500000) adj_ppb = -500000;
+  /* Clamp total adjustment to +/- 100 ppm. Anything beyond this
+   * indicates a measurement error, not real drift. */
+  if (adj_ppb > 100000) adj_ppb = 100000;
+  if (adj_ppb < -100000) adj_ppb = -100000;
 
   /* Use the ppb-based API (ETH_MAC_ESP_CMD_ADJ_PTP_TIME) which calls
    * emac_hal_ptp_adj_inc. This is idempotent: it always computes the

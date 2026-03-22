@@ -1388,25 +1388,43 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   int64_t offset_ns = timespec_delta_ns(remote_timestamp, local_timestamp);
   offset_ns += state->path_delay_ns;
 
-  /* PI controller: compute correction in ppb.
-   * P term: proportional to current offset
-   * I term: accumulated drift estimate */
-  state->offset_pi.drift_acc += (int32_t)(offset_ns / state->offset_pi.ki);
-
-  /* Clamp I term to prevent windup. Real crystal drift is typically
-   * 20-50 ppm, so 50000 ppb (50 ppm) is a generous ceiling. */
-  int32_t max_drift = 50000;
-  if (state->offset_pi.drift_acc > max_drift) {
-    state->offset_pi.drift_acc = max_drift;
-  } else if (state->offset_pi.drift_acc < -max_drift) {
-    state->offset_pi.drift_acc = -max_drift;
+  /* Compute the actual sync interval for proper ppb scaling.
+   * offset_ns is error in nanoseconds. To convert to ppb (ns/s),
+   * we need to know the measurement interval. */
+  int64_t local_time_ns_now = timespec_to_ns(local_timestamp);
+  int64_t interval_ns = 1000000000LL; /* default 1s */
+  if (state->local_time_ns_prev > 0) {
+    int64_t measured = local_time_ns_now - state->local_time_ns_prev;
+    if (measured > 100000000LL && measured < 5000000000LL) {
+      interval_ns = measured;
+    }
   }
 
-  int32_t p_term = (int32_t)(offset_ns / state->offset_pi.kp);
+  /* Convert offset to ppb: how many ppb of frequency error would
+   * produce this offset over one sync interval.
+   * ppb_error = offset_ns * 1e9 / interval_ns */
+  int64_t offset_ppb = (offset_ns * 1000000000LL) / interval_ns;
+
+  /* PI controller operating in ppb domain.
+   * P term: direct fraction of measured error
+   * I term: leaky integrator that converges to steady-state drift */
+  int32_t p_term = (int32_t)(offset_ppb / state->offset_pi.kp);
+
+  /* Leaky integrator (like RAVENNA): decay by 2% each cycle to prevent
+   * windup, then add new error contribution */
+  state->offset_pi.drift_acc = (state->offset_pi.drift_acc * 98) / 100;
+  state->offset_pi.drift_acc += (int32_t)(offset_ppb / state->offset_pi.ki);
+
+  /* Clamp I term to +/- 50 ppm (real crystal drift range) */
+  if (state->offset_pi.drift_acc > 50000) {
+    state->offset_pi.drift_acc = 50000;
+  } else if (state->offset_pi.drift_acc < -50000) {
+    state->offset_pi.drift_acc = -50000;
+  }
+
   int32_t adj_ppb = p_term + state->offset_pi.drift_acc;
 
-  /* Clamp total adjustment to +/- 100 ppm. Anything beyond this
-   * indicates a measurement error, not real drift. */
+  /* Clamp total correction to +/- 100 ppm */
   if (adj_ppb > 100000) adj_ppb = 100000;
   if (adj_ppb < -100000) adj_ppb = -100000;
 

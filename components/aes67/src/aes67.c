@@ -216,21 +216,31 @@ static void playback_task(void *arg)
                               &written, portMAX_DELAY);
         }
 
-        /* Step 2: Read new data from stream buffer (non-blocking).
-         * Raw callback should have written during the ~4ms block above. */
+        /* Step 2: Read new data (NON-BLOCKING, timeout=0).
+         * MUST be non-blocking: any timeout breaks the DMA pacing loop
+         * and causes progressive drift (miss rate increases over time). */
+        static uint32_t real_count = 0, miss_count = 0;
         size_t avail = xStreamBufferBytesAvailable(sbuf);
         if (avail >= 768) {
             xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
             memcpy(prev_buf, pcm_buf, 768);
             have_prev = true;
+            real_count++;
+            /* Drain any extra buffered packets to prevent latency buildup */
+            while (xStreamBufferBytesAvailable(sbuf) >= 768) {
+                xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
+                memcpy(prev_buf, pcm_buf, 768);
+                real_count++;
+            }
         } else if (!have_prev) {
-            /* No data yet, wait for first packet */
+            /* Wait for first packet */
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
+        } else {
+            miss_count++;
+            /* Don't add any delay -- proceed immediately to write
+             * prev_buf, maintaining exact DMA pacing. */
         }
-        /* If no new data but have_prev: prev_buf stays unchanged,
-         * next write will replay it. DMA also replays old descriptors
-         * with auto_clear=false, so the output is smooth. */
 
         total_frames += frames;
         write_count++;
@@ -243,10 +253,12 @@ static void playback_task(void *arg)
         if ((write_count % 1000) == 0) {
             int64_t el = esp_timer_get_time() - start_us;
             if (el > 0) {
-                ESP_LOGI(TAG, "PB: %lu fps, sb=%u/%u",
+                uint32_t total = real_count + miss_count;
+                ESP_LOGI(TAG, "PB: %lu fps, miss=%lu (%.1f%%), sb=%u",
                          (unsigned long)(total_frames * 1000000ULL / el),
-                         (unsigned)xStreamBufferBytesAvailable(sbuf),
-                         (unsigned)xStreamBufferSpacesAvailable(sbuf));
+                         (unsigned long)miss_count,
+                         total > 0 ? (float)miss_count * 100.0f / total : 0.0f,
+                         (unsigned)xStreamBufferBytesAvailable(sbuf));
             }
         }
     }

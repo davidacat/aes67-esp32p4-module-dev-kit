@@ -24,8 +24,9 @@ static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA: 4 descriptors at 192 frames = 768 frames = 16ms. */
-#define DMA_DESC_NUM            4
+/* I2S DMA: 3 descriptors at 192 frames = 576 frames = 12ms.
+ * Minimum for smooth DMA pacing (2 would cause timing issues). */
+#define DMA_DESC_NUM            3
 #define DMA_FRAME_NUM           192
 
 

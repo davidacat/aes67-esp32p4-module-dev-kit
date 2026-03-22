@@ -27,7 +27,7 @@ static const char *TAG = "aes67_ptp";
 #define PTP_LOCKED_STABLE_COUNT     4                     /* iterations at < 1us before locked */
 #define PTP_MONITOR_INTERVAL_MS     500
 #define PTP_MONITOR_STACK_SIZE      4096
-#define PTP_MONITOR_PRIORITY        5
+#define PTP_MONITOR_PRIORITY        10  /* Above SAP, below RTP/audio */
 #define PTP_INTERFACE_NAME          "ETH_0"
 
 /* PTP daemon and clock APIs from local components */

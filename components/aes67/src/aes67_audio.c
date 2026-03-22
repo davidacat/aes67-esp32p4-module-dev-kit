@@ -19,7 +19,7 @@ static const char *TAG = "aes67_audio";
 
 /* I/O task stack size and priority */
 #define AUDIO_IO_TASK_STACK     (4096)
-#define AUDIO_IO_TASK_PRIORITY  (configMAX_PRIORITIES - 1)
+#define AUDIO_IO_TASK_PRIORITY  (22)
 
 /* I2S DMA descriptor count */
 #define DMA_DESC_NUM            4

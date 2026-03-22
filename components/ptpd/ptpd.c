@@ -671,12 +671,10 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   state->local_time_ns_prev = 0;
 
   /* PI controller gains (multiplicative, fixed-point * 1000).
-   * Softer than linuxptp defaults (0.7/0.3) because our system has
-   * ~250us path delay variation vs nanosecond-level in linuxptp.
-   * kp=100 means 0.1: gentle proportional, avoids overshoot
-   * ki=10 means 0.01: slow integral convergence, stable lock */
-  state->offset_pi.kp = 100;   /* 0.1 as fixed-point *1000 */
-  state->offset_pi.ki = 10;    /* 0.01 as fixed-point *1000 */
+   * These are the default gains used when offset is small (<1ms).
+   * When offset is large, adaptive scaling increases them. */
+  state->offset_pi.kp = 200;   /* 0.2 as fixed-point *1000 */
+  state->offset_pi.ki = 20;    /* 0.02 as fixed-point *1000 */
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;
@@ -1417,15 +1415,29 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
 
   int64_t offset_ppb = (offset_ns * 1000000000LL) / interval_ns;
 
-  /* PI controller with multiplicative gains (linuxptp convention).
-   * P term = offset_ppb * kp / 1000  (kp=700 -> multiply by 0.7)
-   * I term: drift_acc += offset_ppb * ki / 1000  (ki=300 -> multiply by 0.3)
-   *
-   * No leaky integrator decay - linuxptp does not use one.
-   * Instead rely on clamping to prevent windup. */
-  int32_t p_term = (int32_t)((offset_ppb * state->offset_pi.kp) / 1000);
+  /* Adaptive gain scaling: use stronger gains when offset is large
+   * to converge quickly, then ease off for stable fine tracking.
+   *   > 1ms offset: gains * 3 (aggressive pull-in)
+   *   > 100us offset: gains * 2 (moderate convergence)
+   *   < 100us offset: base gains (fine tracking) */
+  int32_t kp = state->offset_pi.kp;
+  int32_t ki = state->offset_pi.ki;
+  int64_t abs_offset = (offset_ns < 0) ? -offset_ns : offset_ns;
 
-  state->offset_pi.drift_acc += (int32_t)((offset_ppb * state->offset_pi.ki) / 1000);
+  if (abs_offset > 1000000) {       /* > 1ms */
+    kp *= 3;
+    ki *= 3;
+  } else if (abs_offset > 100000) { /* > 100us */
+    kp *= 2;
+    ki *= 2;
+  }
+
+  /* PI controller with multiplicative gains.
+   * P term = offset_ppb * kp / 1000
+   * I term: drift_acc += offset_ppb * ki / 1000 */
+  int32_t p_term = (int32_t)((offset_ppb * kp) / 1000);
+
+  state->offset_pi.drift_acc += (int32_t)((offset_ppb * ki) / 1000);
 
   /* Clamp I term to +/- 100 ppm */
   if (state->offset_pi.drift_acc > 100000) {

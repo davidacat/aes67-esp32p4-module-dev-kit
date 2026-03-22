@@ -292,6 +292,16 @@ void app_main(void)
     if (aes67_node_get_sap(node, &sap) == ESP_OK && sap) {
         aes67_sap_register_cb(sap, sap_discovery_cb, NULL);
         ESP_LOGI(TAG, "SAP auto-subscribe enabled");
+
+        /* Check if any sources were already discovered before callback
+         * was registered (SAP starts during node_start). */
+        int remote_count = aes67_sap_get_remote_count(sap);
+        for (int i = 0; i < remote_count && !s_sink_added; i++) {
+            aes67_sap_remote_source_t remote;
+            if (aes67_sap_get_remote(sap, i, &remote) == ESP_OK) {
+                sap_discovery_cb(true, &remote, NULL);
+            }
+        }
     }
 
     /* Create a 2-channel L24 source stream. The session manager generates

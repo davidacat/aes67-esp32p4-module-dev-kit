@@ -274,11 +274,13 @@ static esp_err_t es8311_codec_init(void)
         .mclk_inverted = false,
         .sclk_inverted = false,
         .mclk_from_mclk_pin = true,
-        .mclk_frequency = 48000 * 384,     /* 18.432 MHz */
+        .mclk_frequency = 48000 * 256,     /* 12.288 MHz (32-bit slot * 256) */
         .sample_frequency = 48000,
     };
 
-    ret = es8311_init(codec, &clk_cfg, ES8311_RESOLUTION_24, ES8311_RESOLUTION_24);
+    /* Use 32-bit resolution to match I2S 32-bit slot width.
+     * Audio data is 24-bit left-justified in the 32-bit word. */
+    ret = es8311_init(codec, &clk_cfg, ES8311_RESOLUTION_32, ES8311_RESOLUTION_32);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ES8311 init failed: %s", esp_err_to_name(ret));
         return ret;

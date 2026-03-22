@@ -289,20 +289,19 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     }
 
     /* Map word_length to I2S bit depth */
-    i2s_data_bit_width_t bit_width = word_length_to_bits(audio_config->word_length);
-    i2s_slot_mode_t slot_mode = (audio_config->channels <= 2)
-                                    ? I2S_SLOT_MODE_STEREO
-                                    : I2S_SLOT_MODE_STEREO; /* TDM handled separately if needed */
+    i2s_slot_mode_t slot_mode = I2S_SLOT_MODE_STEREO;
 
+    /* Always use 32-bit slot width to match our internal int32_t DMA format.
+     * For 24-bit audio, the data occupies the upper 24 bits of the 32-bit
+     * word with the LSB zero-padded. Using 24-bit slot width with 32-bit
+     * DMA data causes frame alignment slip (1 byte per sample drift). */
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio_config->sample_rate),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bit_width, slot_mode),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, slot_mode),
     };
 
-    /* For 24-bit audio the MCLK multiple must be divisible by 3 */
-    if (audio_config->word_length == 3) {
-        std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
-    }
+    /* With 32-bit slot width, MCLK multiple 256 works for all bit depths */
+    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
 
     std_cfg.gpio_cfg = (i2s_std_gpio_config_t){
         .mclk = pins->mck_gpio,

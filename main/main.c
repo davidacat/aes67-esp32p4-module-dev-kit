@@ -80,12 +80,15 @@ static const char *TAG = "main";
 #define ETH_PHY_RST_GPIO    51
 #define ETH_PHY_ADDR        1
 
-/* I2S to ES8311 codec */
+/* I2S to ES8311 codec.
+ * DOUT = GPIO 9: data FROM ESP32 TO ES8311 (DSDIN pin on codec)
+ * DIN  = GPIO 11: data FROM ES8311 TO ESP32 (ASDOUT pin on codec)
+ * See ESP-IDF issue #14297 for the DI/DO swap fix. */
 #define I2S_MCLK_GPIO       13
 #define I2S_SCLK_GPIO       12
 #define I2S_LRCK_GPIO       10
-#define I2S_DOUT_GPIO       11   /* ESP -> codec (ASDOUT) */
-#define I2S_DIN_GPIO         9   /* codec -> ESP (DSDIN) */
+#define I2S_DOUT_GPIO        9   /* ESP32 output -> codec DSDIN */
+#define I2S_DIN_GPIO        11   /* codec ASDOUT -> ESP32 input */
 
 /* Power amplifier enable (active high) */
 #define PA_CTRL_GPIO        53

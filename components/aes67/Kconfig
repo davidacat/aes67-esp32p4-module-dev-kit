@@ -168,15 +168,17 @@ menu "AES67 RAVENNA Component"
             GPIO pin for I2S word select (LRCLK).
 
     config AES67_I2S_DOUT_GPIO
-        int "I2S data out GPIO"
-        default 11
-        help
-            GPIO pin for I2S serial data output (playback/sink).
-
-    config AES67_I2S_DIN_GPIO
-        int "I2S data in GPIO"
+        int "I2S data out GPIO (ESP32 -> codec)"
         default 9
         help
-            GPIO pin for I2S serial data input (capture/source).
+            GPIO pin for I2S serial data output to codec DAC (DSDIN).
+            On ESP32-P4-NANO this is GPIO9.
+
+    config AES67_I2S_DIN_GPIO
+        int "I2S data in GPIO (codec -> ESP32)"
+        default 11
+        help
+            GPIO pin for I2S serial data input from codec ADC (ASDOUT).
+            On ESP32-P4-NANO this is GPIO11.
 
 endmenu

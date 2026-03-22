@@ -26,7 +26,6 @@
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"
 #include "driver/i2s_std.h"
-#include "soc/rtc.h"
 
 static const char *TAG = "aes67";
 
@@ -186,8 +185,11 @@ static void playback_task(void *arg)
             ESP_LOGI(TAG, "Playback: stream buffer tight-loop mode");
         }
 
+        /* Try external hook stream buffer first, fall back to RTP engine's */
+        extern StreamBufferHandle_t s_hook_sbuf;
         extern StreamBufferHandle_t aes67_rtp_engine_get_stream_buf(void *h);
-        StreamBufferHandle_t sbuf = aes67_rtp_engine_get_stream_buf(node->rtp);
+        StreamBufferHandle_t sbuf = s_hook_sbuf ? s_hook_sbuf :
+                                     aes67_rtp_engine_get_stream_buf(node->rtp);
         if (!sbuf) {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
@@ -217,101 +219,37 @@ static void playback_task(void *arg)
                               &written, portMAX_DELAY);
         }
 
-        /* Step 2: Read new data (NON-BLOCKING, timeout=0).
-         * MUST be non-blocking: any timeout breaks the DMA pacing loop
-         * and causes progressive drift (miss rate increases over time). */
-        static uint32_t real_count = 0, miss_count = 0;
-        static int32_t sdm0_adj = 0;
-
-        /* Try to read. If empty, spin briefly for the packet to arrive.
-         * The DMA keeps playing during our spin -- no pacing impact.
-         * Each spin iteration ~10us. 3 attempts * 50us = 150us max spin. */
-        bool got_data = false;
-        for (int attempt = 0; attempt < 4; attempt++) {
-            if (xStreamBufferBytesAvailable(sbuf) >= 768) {
-                xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
-                memcpy(prev_buf, pcm_buf, 768);
-                have_prev = true;
-                real_count++;
-                got_data = true;
-                /* Drain extra packets to prevent latency buildup */
-                while (xStreamBufferBytesAvailable(sbuf) >= 768) {
-                    xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
-                    memcpy(prev_buf, pcm_buf, 768);
-                    real_count++;
-                }
-                break;
-            }
-            if (!have_prev) break;
-            /* Brief spin: ~50us. DMA continues playing. */
-            for (volatile int j = 0; j < 5000; j++) { }
+        /* Step 2: Read new data from stream buffer (non-blocking).
+         * Raw callback should have written during the ~4ms block above. */
+        size_t avail = xStreamBufferBytesAvailable(sbuf);
+        if (avail >= 768) {
+            xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
+            memcpy(prev_buf, pcm_buf, 768);
+            have_prev = true;
+        } else if (!have_prev) {
+            /* No data yet, wait for first packet */
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
         }
-
-        if (!got_data) {
-            if (!have_prev) {
-                vTaskDelay(pdMS_TO_TICKS(2));
-                continue;
-            }
-            miss_count++;
-        }
+        /* If no new data but have_prev: prev_buf stays unchanged,
+         * next write will replay it. DMA also replays old descriptors
+         * with auto_clear=false, so the output is smooth. */
 
         total_frames += frames;
         write_count++;
 
-        /* Adaptive APLL clock recovery: adjust sdm0 to match network rate.
-         * Each sdm0 step = ~4.1 ppm = ~0.20 Hz at 48kHz.
-         * Monitor stream buffer level: if growing, slow down; if empty, speed up. */
-        if ((write_count % 50) == 0 && write_count > 200) {
-            extern void rtc_clk_apll_coeff_set(uint32_t o_div, uint32_t sdm0,
-                                                uint32_t sdm1, uint32_t sdm2);
-            /* Read current buffer level */
-            size_t buf_level = xStreamBufferBytesAvailable(sbuf);
-            /* Target: ~1 packet (768 bytes) buffered */
-            /* sdm0_adj declared at function scope above */
-            if (buf_level > 768 * 2) {
-                /* Buffer growing: I2S too slow, speed up (decrease sdm0) */
-                sdm0_adj--;
-            } else if (buf_level == 0 && miss_count > real_count / 20) {
-                /* Buffer empty + high miss rate: I2S too fast, slow down */
-                sdm0_adj++;
-            }
-            /* Clamp to +/- 10 steps (~41 ppm max adjustment) */
-            if (sdm0_adj > 10) sdm0_adj = 10;
-            if (sdm0_adj < -10) sdm0_adj = -10;
-
-            /* Base coefficients for 36.864MHz (from APLL init):
-             * o_div=0, sdm2=3, sdm1=28, sdm0=147 (approximate)
-             * Read actual values from rtc_clk_apll_coeff_calc result.
-             * For now, adjust sdm0 relative to whatever the driver set. */
-            static bool base_read = false;
-            static uint32_t base_sdm0 = 0, base_sdm1 = 0, base_sdm2 = 0, base_o_div = 0;
-            if (!base_read) {
-                uint32_t real_freq = rtc_clk_apll_coeff_calc(
-                    36864000, &base_o_div, &base_sdm0, &base_sdm1, &base_sdm2);
-                ESP_LOGI(TAG, "APLL base: freq=%lu, o_div=%lu, sdm2=%lu, sdm1=%lu, sdm0=%lu",
-                         (unsigned long)real_freq, (unsigned long)base_o_div,
-                         (unsigned long)base_sdm2, (unsigned long)base_sdm1,
-                         (unsigned long)base_sdm0);
-                base_read = true;
-            }
-
-            int32_t new_sdm0 = (int32_t)base_sdm0 + sdm0_adj;
-            if (new_sdm0 < 0) new_sdm0 = 0;
-            if (new_sdm0 > 255) new_sdm0 = 255;
-            rtc_clk_apll_coeff_set(base_o_div, (uint32_t)new_sdm0,
-                                    base_sdm1, base_sdm2);
-        }
+        /* Adaptive clock recovery DISABLED: ESP32-P4 I2S fractional divider
+         * has only 3472 ppm resolution (denom=288). Each numerator step causes
+         * a 0.35% pitch shift -- far too coarse for smooth clock recovery.
+         * Need APLL or different clock source for sub-ppm adjustment. */
 
         if ((write_count % 1000) == 0) {
             int64_t el = esp_timer_get_time() - start_us;
             if (el > 0) {
-                uint32_t total = real_count + miss_count;
-                ESP_LOGI(TAG, "PB: %lu fps, miss=%lu (%.1f%%), sb=%u",
+                ESP_LOGI(TAG, "PB: %lu fps, sb=%u/%u",
                          (unsigned long)(total_frames * 1000000ULL / el),
-                         (unsigned long)miss_count,
-                         total > 0 ? (float)miss_count * 100.0f / total : 0.0f,
                          (unsigned)xStreamBufferBytesAvailable(sbuf),
-                         (long)sdm0_adj);
+                         (unsigned)xStreamBufferSpacesAvailable(sbuf));
             }
         }
     }
@@ -508,16 +446,27 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
     /* Enable direct RTP RX -> staging ring path.
      * RTP RX task converts and writes to staging inline,
      * DMA ISR drains staging to I2S. No jitter buffer or playback task. */
-    /* Raw UDP PCB + stream buffer + playback task on core 0.
-     * L2 TAP captures ALL IPv4 frames, breaking PTP/SAP/mDNS.
-     * Instead, raw PCB handles RTP in lwIP context (core 1),
-     * playback task runs on core 0 at max priority (no preemption). */
-    /* Raw UDP PCB playback disabled: Ethernet hook handles RTP directly.
-     * The raw PCB still captures packets but doesn't write to I2S. */
+    extern void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t h,
+                                               void *audio);
+    aes67_rtp_engine_set_playback(handle->rtp, handle->audio);
+    ESP_LOGI(TAG, "Direct RTP->I2S path enabled (zero-buffer)");
 
-    /* Playback task DISABLED: Ethernet MAC hook writes directly to I2S.
-     * No stream buffer, no playback task, no contention. */
-    ESP_LOGI(TAG, "Playback via Ethernet MAC hook (no playback task)");
+    /* Start dedicated playback task AFTER running=true */
+    {
+        static TaskHandle_t pb_task = NULL;
+        /* Playback on core 1 at priority 20 (below lwIP 22, above RX 17).
+         * lwIP processes packets first, then playback drains the jitter
+         * buffer, then RX picks up from the socket. */
+        /* Playback on core 1 at priority 21 (above RTP RX 17, below lwIP 22).
+         * Was on core 0 where TIC task (prio 21) preempted it every 1ms. */
+        xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
+                                21, &pb_task, 1);
+
+        /* Register playback task for notification from RTP RX */
+        extern void aes67_rtp_engine_set_notify_task(
+            aes67_rtp_engine_handle_t h, TaskHandle_t task);
+        aes67_rtp_engine_set_notify_task(handle->rtp, pb_task);
+    }
 
     /* Start the hardware PTP frame timer and audio frame task.
      * This task handles both TX and RX at PTP-aligned boundaries. */

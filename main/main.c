@@ -36,6 +36,7 @@
 #include "aes67_audio.h"
 #include "dsps_tone_gen.h"
 #include "driver/i2c.h"
+#include "freertos/stream_buffer.h"
 #include "driver/i2s_std.h"
 #include "es8311.h"
 
@@ -146,6 +147,7 @@ static i2s_chan_handle_t s_hook_tx_chan = NULL;
 static int32_t *s_hook_tmp32 = NULL;
 static int16_t *s_hook_i16 = NULL;
 static uint32_t s_hook_pkt_count = 0;
+StreamBufferHandle_t s_hook_sbuf = NULL;  /* Global: shared with playback task */
 
 /* Called for EVERY Ethernet frame, before lwIP.
  * RTP multicast on port 5004: process + free. Everything else: forward to lwIP. */
@@ -204,13 +206,12 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
         s_hook_i16[i*2+1] = s16;
     }
 
-    /* Write directly to I2S. portMAX_DELAY = DMA pacing at 48kHz.
-     * This blocks the Ethernet task for ~4ms per packet. Other packets
-     * queue in Ethernet DMA (32 RX buffers = 16ms headroom). */
-    size_t written = 0;
-    i2s_channel_write(s_hook_tx_chan, s_hook_i16,
-                       frames * 2 * sizeof(int16_t),
-                       &written, portMAX_DELAY);
+    /* Write to stream buffer (non-blocking, 0 timeout).
+     * The playback task reads and writes to I2S with DMA pacing. */
+    if (s_hook_sbuf) {
+        xStreamBufferSend(s_hook_sbuf, s_hook_i16,
+                           frames * 2 * sizeof(int16_t), 0);
+    }
 
     s_hook_pkt_count++;
     if ((s_hook_pkt_count % 10000) == 0) {
@@ -479,14 +480,17 @@ void app_main(void)
      * This enables I2S which starts MCLK generation. */
     ESP_ERROR_CHECK(aes67_node_start(node));
 
-    /* Enable the Ethernet RTP hook now that I2S TX channel is available */
+    /* Create stream buffer for Ethernet hook -> playback task path */
+    s_hook_sbuf = xStreamBufferCreate(12288, 768);
+
+    /* Set up the Ethernet hook's I2S channel (for stats, not direct write) */
     {
         extern i2s_chan_handle_t aes67_audio_get_tx_chan(void *h);
         extern esp_err_t aes67_node_get_audio(aes67_node_handle_t h, aes67_audio_handle_t *a);
         aes67_audio_handle_t audio = NULL;
         aes67_node_get_audio(node, &audio);
         s_hook_tx_chan = aes67_audio_get_tx_chan(audio);
-        ESP_LOGI(TAG, "Ethernet hook I2S TX channel set");
+        ESP_LOGI(TAG, "Ethernet hook -> stream buffer -> playback task");
     }
 
     /* Initialize ES8311 codec AFTER I2S is running (MCLK must be active).

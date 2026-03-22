@@ -30,7 +30,7 @@ static const char *TAG = "aes67_rtp";
 #define AES67_MAX_STREAMS       (CONFIG_AES67_MAX_SOURCES + CONFIG_AES67_MAX_SINKS)
 #define AES67_RX_TASK_STACK     4096
 #define AES67_RX_BUF_SIZE       2048
-#define AES67_JITTER_BUF_MULT   16  /* Must hold multiple large packets (192 frames/pkt) */
+#define AES67_JITTER_BUF_MULT   64  /* Large buffer to absorb clock drift between source and local I2S */
 
 /* Ring buffer for audio data. Single reader, single writer. */
 typedef struct {
@@ -352,6 +352,17 @@ static void rx_task_func(void *arg)
         if (!rtp_parse_header(rx_buf, recv_len, &hdr)) {
             continue;
         }
+
+        /* Skip our own TX packets (same port, different multicast group).
+         * Check all source streams for SSRC match. */
+        bool is_own = false;
+        for (int i = 0; i < AES67_MAX_STREAMS && !is_own; i++) {
+            struct aes67_rtp_stream *s = engine->streams[i];
+            if (s && s->direction == AES67_STREAM_SOURCE && s->ssrc == hdr.ssrc) {
+                is_own = true;
+            }
+        }
+        if (is_own) continue;
 
         /* Find the matching sink stream */
         struct aes67_rtp_stream *stream = find_sink_stream(engine, hdr.ssrc,

@@ -193,29 +193,9 @@ static void audio_io_task(void *arg)
             ctx->frame_cb(frame_counter, ctx->frame_cb_user_data);
         }
 
-        /* 4. Read from playback ring buffer and send to I2S TX */
-        playback_ring_to_dma(ctx, ctx->dma_tx_buf, frames_read);
-
-        /* Debug: log DMA write content at startup and after sink connects */
-        if (frame_counter <= 3 || frame_counter == 30000 || frame_counter == 35000) {
-            int32_t *dbg = (int32_t *)ctx->dma_tx_buf;
-            uint32_t avail = ring_available(ctx->playback_wr, ctx->playback_rd,
-                                            ctx->buf_size_frames);
-            ESP_LOGI(TAG, "I2S TX DMA[%lu]: frames=%lu play_avail=%lu "
-                     "dma[0]=0x%08lx dma[1]=0x%08lx dma[2]=0x%08lx dma[3]=0x%08lx",
-                     (unsigned long)frame_counter, (unsigned long)frames_read,
-                     (unsigned long)avail,
-                     (unsigned long)dbg[0], (unsigned long)dbg[1],
-                     (unsigned long)dbg[2], (unsigned long)dbg[3]);
-        }
-
-        ret = i2s_channel_write(ctx->tx_chan, ctx->dma_tx_buf,
-                                bytes_per_frame * frames_read,
-                                &bytes_written,
-                                pdMS_TO_TICKS(I2S_IO_TIMEOUT_MS));
-        if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
-            ESP_LOGW(TAG, "i2s_channel_write error: %s", esp_err_to_name(ret));
-        }
+        /* Playback (I2S TX) is now handled directly by the TIC task
+         * via aes67_audio_direct_write(). We do NOT write to I2S TX
+         * here to avoid two tasks competing on the same channel. */
     }
 
     ESP_LOGI(TAG, "I/O task exiting");

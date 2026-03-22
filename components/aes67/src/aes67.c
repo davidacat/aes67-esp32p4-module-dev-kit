@@ -127,8 +127,9 @@ static void playback_task(void *arg)
 {
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
 
-    uint32_t spp = (node->config.audio.sample_rate *
-                     node->config.audio.packet_time_us) / 1000000;
+    /* Read in larger chunks (192 frames = 4ms) to reduce per-write
+     * overhead and better match the I2S DMA descriptor alignment. */
+    uint32_t spp = 192;
     int32_t *buf = heap_caps_malloc(spp * node->config.audio.channels *
                                      sizeof(int32_t), MALLOC_CAP_INTERNAL);
     if (!buf) {

@@ -1867,12 +1867,12 @@ static int ptp_process_delay_resp(FAR struct ptp_state_s *state,
       state->path_delay_ns += (path_delay - state->path_delay_ns)
                               / state->path_delay_avgcount;
 
-      ptpinfo("Path delay: %ld ns (avg: %ld ns)\n",
+      ESP_LOGD(TAG, "Path delay: %ld ns (avg: %ld ns)",
         (long)path_delay, (long)state->path_delay_ns);
     }
   else
     {
-      ptpwarn("Path delay out of range: %lld ns\n",
+      ESP_LOGD(TAG, "Path delay out of range: %lld ns",
               (long long)path_delay);
     }
 
@@ -1934,14 +1934,14 @@ static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
       return ptp_process_followup(state, &state->rxbuf.follow_up);
 
     case PTP_MSGTYPE_DELAY_RESP:
-      ptpinfo("Got delay-resp, seq %ld\n",
+      ESP_LOGD(TAG, "Got delay-resp, seq %ld",
               (long)ptp_get_sequence(&state->rxbuf.header));
       return ptp_process_delay_resp(state, &state->rxbuf.delay_resp);
 #endif
 
 #ifdef CONFIG_NETUTILS_PTPD_SERVER
     case PTP_MSGTYPE_DELAY_REQ:
-      ptpinfo("Got delay req, seq %ld\n",
+      ESP_LOGD(TAG, "Got delay req, seq %ld",
               (long)ptp_get_sequence(&state->rxbuf.header));
       return ptp_process_delay_req(state, &state->rxbuf.delay_req);
 #endif

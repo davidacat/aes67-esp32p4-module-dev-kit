@@ -19,6 +19,7 @@
 #include <errno.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -56,6 +57,9 @@ struct aes67_rtp_stream {
     uint8_t *tx_packet_buf;     /* Scratch buffer for packet assembly (internal SRAM) */
     bool active;
     bool first_packet;          /* True until first RTP packet received (sinks) */
+    /* Jitter measurement for RX */
+    int64_t last_rx_time_us;    /* Timestamp of last received packet in microseconds */
+    int32_t jitter_us;          /* Estimated inter-packet jitter in microseconds */
 };
 
 /* Internal engine structure */
@@ -373,6 +377,21 @@ static void rx_task_func(void *arg)
         stream->status.last_seq = hdr.seq;
         stream->status.last_rtp_timestamp = hdr.timestamp;
         stream->status.status_flags |= AES67_RTP_STATUS_RECEIVING;
+
+        /* Measure inter-packet arrival jitter (RFC 3550 algorithm).
+         * Uses esp_timer for microsecond precision. */
+        int64_t now_us = esp_timer_get_time();
+        if (stream->last_rx_time_us > 0) {
+            int64_t expected_us = (int64_t)stream->samples_per_packet
+                                  * 1000000LL / stream->config.sample_rate;
+            int64_t actual_us = now_us - stream->last_rx_time_us;
+            int32_t deviation = (int32_t)(actual_us - expected_us);
+            if (deviation < 0) deviation = -deviation;
+            /* Exponential moving average: jitter += (deviation - jitter) / 16 */
+            stream->jitter_us += (deviation - stream->jitter_us) / 16;
+            stream->status.jitter_us = stream->jitter_us;
+        }
+        stream->last_rx_time_us = now_us;
 
         /* Convert from network byte order to native samples */
         const uint8_t *payload = rx_buf + AES67_RTP_HEADER_SIZE;

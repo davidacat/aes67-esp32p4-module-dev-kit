@@ -498,8 +498,10 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 }; /* 100ms */
     setsockopt(engine->rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    /* Set socket buffer sizes for low-latency audio */
-    aes67_net_set_buffers(engine->rx_sock, 0, 65536);
+    /* Large RX buffer to hold packets while i2s_channel_write blocks.
+     * With 192-frame packets at 1152 bytes each, 128KB holds ~111 packets
+     * = ~444ms of buffered audio. */
+    aes67_net_set_buffers(engine->rx_sock, 0, 131072);
 
     *handle = engine;
     ESP_LOGI(TAG, "Engine initialized, RX socket on port %u",

@@ -21,8 +21,10 @@ static const char *TAG = "aes67_audio";
 #define AUDIO_IO_TASK_STACK     (4096)
 #define AUDIO_IO_TASK_PRIORITY  (22)
 
-/* I2S DMA descriptor count */
-#define DMA_DESC_NUM            4
+/* I2S DMA descriptor count - more descriptors = deeper DMA FIFO = fewer underruns.
+ * Each descriptor holds dma_frame_num frames. With 8 descriptors at 64 frames
+ * each = 512 frames = ~10.7ms of buffer at 48kHz. */
+#define DMA_DESC_NUM            8
 
 /* Timeout for I2S read/write operations (ms) */
 #define I2S_IO_TIMEOUT_MS       100

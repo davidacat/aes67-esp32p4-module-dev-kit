@@ -50,11 +50,7 @@ static void sap_discovery_cb(bool is_announce,
         return;
     }
 
-    /* Only subscribe to the RPi daemon source */
-    if (strstr(source->name, "Daemon") == NULL &&
-        strstr(source->name, "ALSA") == NULL) {
-        return;
-    }
+    /* Subscribe to any discovered source (first one wins) */
 
     ESP_LOGI("main", "Auto-subscribing to \"%s\" from SAP", source->name);
 

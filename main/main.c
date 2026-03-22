@@ -285,7 +285,7 @@ static esp_err_t es8311_codec_init(void)
     }
 
     /* Set output volume (0-100) */
-    ret = es8311_voice_volume_set(codec, 35, NULL);
+    ret = es8311_voice_volume_set(codec, 50, NULL);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "ES8311 volume set failed: %s", esp_err_to_name(ret));
     }

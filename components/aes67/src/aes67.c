@@ -202,7 +202,7 @@ static void playback_task(void *arg)
         size_t avail = xStreamBufferBytesAvailable(sbuf);
         if (avail >= 768) {
             /* Full packet ready -- read and update hold buffer */
-            size_t got = xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
+            xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
             frames = 192;
             memcpy(hold_buf, pcm_buf, 768);
             have_hold = true;
@@ -225,8 +225,7 @@ static void playback_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
-            size_t got = xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
-            if (got < 768) continue;
+            if (xStreamBufferReceive(sbuf, pcm_buf, 768, 0) < 768) continue;
             frames = 192;
             memcpy(hold_buf, pcm_buf, 768);
             have_hold = true;
@@ -248,9 +247,10 @@ static void playback_task(void *arg)
         total_frames += frames;
         write_count++;
 
-        /* TODO: adaptive clock recovery needs correct base divider values.
-         * Current implementation has wrong numerator causing 52kHz instead of 48kHz.
-         * Need to read actual divider from registers at startup. */
+        /* Adaptive clock recovery DISABLED: ESP32-P4 I2S fractional divider
+         * has only 3472 ppm resolution (denom=288). Each numerator step causes
+         * a 0.35% pitch shift -- far too coarse for smooth clock recovery.
+         * Need APLL or different clock source for sub-ppm adjustment. */
 
         if ((write_count % 1000) == 0) {
             int64_t el = esp_timer_get_time() - start_us;

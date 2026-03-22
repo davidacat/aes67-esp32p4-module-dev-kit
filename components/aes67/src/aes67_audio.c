@@ -438,6 +438,11 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
 
     handle->running = true;
 
+    /* Read and cache the clock divider set by i2s_channel_init_std_mode.
+     * This gives us the correct base values for adaptive clock recovery. */
+    extern void aes67_audio_read_clock_divider(aes67_audio_handle_t h);
+    aes67_audio_read_clock_divider(handle);
+
     ESP_LOGI(TAG, "Audio started (DMA: %d desc x %d frames)",
              DMA_DESC_NUM, DMA_FRAME_NUM);
     return ESP_OK;
@@ -711,54 +716,80 @@ void aes67_audio_get_staging_stats(aes67_audio_handle_t handle,
     }
 }
 
+/* Cached base divider values (read from registers after I2S init) */
+static uint32_t base_div_n = 0;
+static uint32_t base_div_x = 0;
+static uint32_t base_div_y = 0;
+static uint32_t base_div_z = 0;
+static uint32_t base_div_yn1 = 0;
+static uint32_t base_numerator = 0;
+static uint32_t base_denominator = 0;
+
+/* Read and cache the I2S0 TX clock divider from hardware registers.
+ * Must be called AFTER i2s_channel_init_std_mode(). */
+void aes67_audio_read_clock_divider(aes67_audio_handle_t handle)
+{
+    (void)handle;
+    base_div_n = HP_SYS_CLKRST.peri_clk_ctrl13.reg_i2s0_tx_div_n;
+    base_div_x = HP_SYS_CLKRST.peri_clk_ctrl13.reg_i2s0_tx_div_x;
+    base_div_y = HP_SYS_CLKRST.peri_clk_ctrl14.reg_i2s0_tx_div_y;
+    base_div_z = HP_SYS_CLKRST.peri_clk_ctrl14.reg_i2s0_tx_div_z;
+    base_div_yn1 = HP_SYS_CLKRST.peri_clk_ctrl14.reg_i2s0_tx_div_yn1;
+
+    /* Reverse the x,y,z,yn1 -> numerator,denominator conversion */
+    if (base_div_z > 0) {
+        base_denominator = (base_div_x + 1) * base_div_z + base_div_y;
+        base_numerator = base_div_yn1 ? (base_denominator - base_div_z) : base_div_z;
+    }
+
+    ESP_LOGI("aes67_audio", "I2S0 TX clk: N=%lu, x=%lu, y=%lu, z=%lu, yn1=%lu "
+             "-> numer=%lu denom=%lu (divider=N+%lu/%lu)",
+             (unsigned long)base_div_n, (unsigned long)base_div_x,
+             (unsigned long)base_div_y, (unsigned long)base_div_z,
+             (unsigned long)base_div_yn1,
+             (unsigned long)base_numerator, (unsigned long)base_denominator,
+             (unsigned long)base_numerator, (unsigned long)base_denominator);
+}
+
 /* Adjust the I2S TX MCLK divider at runtime to fine-tune sample rate.
  * This is used for adaptive clock recovery: speed up or slow down the
  * I2S clock to match the network source rate.
  * ppm_adj: parts-per-million adjustment. +100 = 0.01% faster. */
 void aes67_audio_adjust_clock_ppm(aes67_audio_handle_t handle, int32_t ppm_adj)
 {
-    if (!handle) return;
+    if (!handle || base_denominator == 0) return;
 
-    /* Base MCLK divider for 48kHz with 40MHz XTAL and MCLK_MULTIPLE_384:
-     * MCLK = 48000 * 384 = 18,432,000 Hz
-     * Divider = 40,000,000 / 18,432,000 = 2 + 1,136,000/18,432,000
-     * = 2 + numerator/denominator
-     * We use denominator=1000 for ~1ppm resolution. */
-    const uint32_t base_denom = 18432;
-    const uint32_t base_numer = 1136;  /* 40M/18.432M = 2 + 1136/18432 */
+    /* Adjust numerator relative to the cached base values.
+     * Increasing numerator = larger divider = slower clock.
+     * ppm_adj > 0 means "source is faster, speed up I2S" = decrease numerator. */
+    int64_t adj = (int64_t)ppm_adj * (int64_t)base_denominator / 1000000;
+    int32_t new_numer = (int32_t)base_numerator - (int32_t)adj;
+    if (new_numer < 1) new_numer = 1;
+    if (new_numer > (int32_t)base_denominator - 1) new_numer = base_denominator - 1;
 
-    /* Adjust numerator by ppm. Increasing numerator = larger divider = slower clock.
-     * ppm_adj > 0 means speed UP = smaller divider = decrease numerator. */
-    int32_t adj_numer = (int32_t)base_numer - (int32_t)(ppm_adj * base_denom / 1000000);
-    if (adj_numer < 0) adj_numer = 0;
-    if (adj_numer > (int32_t)base_denom - 1) adj_numer = base_denom - 1;
+    /* Convert numerator/denominator back to x,y,z,yn1 format */
+    uint32_t numer = (uint32_t)new_numer;
+    uint32_t denom = base_denominator;
+    uint32_t div_yn1 = numer * 2 > denom;
+    uint32_t div_z = div_yn1 ? denom - numer : numer;
+    uint32_t div_x = div_z ? (denom / div_z - 1) : 0;
+    uint32_t div_y = div_z ? (denom % div_z) : 0;
 
-    /* Compute the raw divider values (x, y, z, yn1) from the fraction.
-     * This mirrors _i2s_ll_tx_set_mclk() logic. */
-    uint32_t div_x = 0, div_y = 0, div_z = 0, div_yn1 = 0;
-    uint32_t numer = (uint32_t)adj_numer;
-    if (base_denom && numer) {
-        div_yn1 = numer * 2 > base_denom;
-        div_z = div_yn1 ? base_denom - numer : numer;
-        div_x = div_z ? (base_denom / div_z - 1) : 0;
-        div_y = div_z ? (base_denom % div_z) : 0;
-    }
-
-    /* Write to I2S0 TX clock divider registers directly.
-     * Must use the workaround sequence: set small div first. */
+    /* Write to I2S0 TX clock divider registers.
+     * Workaround: set small div first, then target. */
     HAL_FORCE_MODIFY_U32_REG_FIELD(HP_SYS_CLKRST.peri_clk_ctrl13,
                                     reg_i2s0_tx_div_n, 2);
     HP_SYS_CLKRST.peri_clk_ctrl14.reg_i2s0_tx_div_yn1 = 0;
     HP_SYS_CLKRST.peri_clk_ctrl14.reg_i2s0_tx_div_y = 1;
     HP_SYS_CLKRST.peri_clk_ctrl14.reg_i2s0_tx_div_z = 0;
     HP_SYS_CLKRST.peri_clk_ctrl13.reg_i2s0_tx_div_x = 0;
-    /* Set target divider */
+    /* Set target */
     HP_SYS_CLKRST.peri_clk_ctrl14.reg_i2s0_tx_div_yn1 = div_yn1;
     HP_SYS_CLKRST.peri_clk_ctrl14.reg_i2s0_tx_div_z = div_z;
     HP_SYS_CLKRST.peri_clk_ctrl14.reg_i2s0_tx_div_y = div_y;
     HP_SYS_CLKRST.peri_clk_ctrl13.reg_i2s0_tx_div_x = div_x;
     HAL_FORCE_MODIFY_U32_REG_FIELD(HP_SYS_CLKRST.peri_clk_ctrl13,
-                                    reg_i2s0_tx_div_n, 2);
+                                    reg_i2s0_tx_div_n, base_div_n);
 }
 
 SemaphoreHandle_t aes67_audio_get_dma_sem(aes67_audio_handle_t handle)

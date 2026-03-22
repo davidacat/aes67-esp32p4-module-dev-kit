@@ -142,27 +142,36 @@ static void playback_task(void *arg)
 
     ESP_LOGI(TAG, "Playback task started (spp=%lu)", (unsigned long)spp);
 
+    /* Cache the sink stream handle to avoid mutex contention with
+     * session manager on every iteration (1000 times/sec). */
+    aes67_rtp_stream_handle_t cached_sink = NULL;
+
     while (node->running) {
-        /* Find first active sink */
-        bool found_data = false;
-        int sink_count = aes67_session_get_sink_count(node->session);
-        for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
-            aes67_sink_t sink;
-            if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
-                sink.enabled && sink.rtp_stream) {
-                esp_err_t err = aes67_rtp_sink_read(sink.rtp_stream, buf, spp);
-                if (err == ESP_OK) {
-                    /* Write to I2S - blocks until DMA accepts data.
-                     * This naturally paces at 48kHz sample rate. */
-                    aes67_audio_direct_write(node->audio, buf, spp);
-                    found_data = true;
+        /* Look up sink handle only if not cached */
+        if (!cached_sink) {
+            int sink_count = aes67_session_get_sink_count(node->session);
+            for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
+                aes67_sink_t sink;
+                if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
+                    sink.enabled && sink.rtp_stream) {
+                    cached_sink = sink.rtp_stream;
+                    ESP_LOGI(TAG, "Playback: locked to sink stream");
+                    break;
                 }
-                break;
+            }
+            if (!cached_sink) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
             }
         }
 
-        if (!found_data) {
-            /* No data available - yield briefly and try again */
+        /* Read from jitter buffer and write to I2S.
+         * No mutex, no session manager lookup - direct ring buffer access. */
+        esp_err_t err = aes67_rtp_sink_read(cached_sink, buf, spp);
+        if (err == ESP_OK) {
+            aes67_audio_direct_write(node->audio, buf, spp);
+        } else {
+            /* Underrun - yield briefly */
             vTaskDelay(1);
         }
     }

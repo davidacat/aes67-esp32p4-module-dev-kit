@@ -667,8 +667,12 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
 
-  state->offset_pi.kp = 1;
-  state->offset_pi.ki = 10;
+  /* PI controller gains for frequency lock. Higher values = slower response
+   * but more stable. With 1s sync interval on ESP32-P4:
+   * kp=4 means apply 25% of offset as proportional correction
+   * ki=32 means integrate 1/32 of offset per cycle */
+  state->offset_pi.kp = 4;
+  state->offset_pi.ki = 32;
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;
@@ -1390,33 +1394,45 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   // compute P component and the whole controller
   int32_t adj = offset_ns / state->offset_pi.kp + state->offset_pi.drift_acc;
 
-  // Compute difference between number of ticks in slave and master over sync period. This is used to lock the frequency with the master.
-  // However, it never catch-up the offset by itself, hence also add `adj` at the end
+  /* Compute frequency difference between slave and master over the sync
+   * period. On the first call after init or a clock step, skip the
+   * frequency adjustment since the previous timestamps are invalid. */
   int64_t remote_time_ns = timespec_to_ns(remote_timestamp);
   int64_t local_time_ns = timespec_to_ns(local_timestamp);
-  int64_t remote_delta_ns = remote_time_ns - state->remote_time_ns_prev;
-  int64_t local_delta_ns = local_time_ns - state->local_time_ns_prev;
-  // clock tick difference between master and slave
-  int64_t tick_diff = remote_delta_ns - local_delta_ns;
 
-  // compute how to scale the slave frequency to lock with master frequency and also try to catch-up the offset
-  double freq_scale = ((double)(remote_delta_ns /*+ tick_diff*/ + adj)) / (double)local_delta_ns;
-  esp_eth_clock_adj_param_t clk_adj_param = {
-    .mode = ETH_CLK_ADJ_FREQ_SCALE,
-    .freq_scale = freq_scale
-  };
-  esp_eth_clock_adjtime(CLOCK_PTP_SYSTEM, &clk_adj_param);
+  if (state->remote_time_ns_prev != 0 && state->local_time_ns_prev != 0) {
+    int64_t remote_delta_ns = remote_time_ns - state->remote_time_ns_prev;
+    int64_t local_delta_ns = local_time_ns - state->local_time_ns_prev;
+
+    /* Sanity check: deltas should be roughly 1 sync interval (not huge) */
+    if (local_delta_ns > 0 && local_delta_ns < 5000000000LL &&
+        remote_delta_ns > 0 && remote_delta_ns < 5000000000LL) {
+      int64_t tick_diff = remote_delta_ns - local_delta_ns;
+
+      double freq_scale = ((double)(remote_delta_ns + adj)) / (double)local_delta_ns;
+
+      /* Clamp freq_scale to prevent runaway adjustments */
+      if (freq_scale > 1.001) freq_scale = 1.001;
+      if (freq_scale < 0.999) freq_scale = 0.999;
+
+      esp_eth_clock_adj_param_t clk_adj_param = {
+        .mode = ETH_CLK_ADJ_FREQ_SCALE,
+        .freq_scale = freq_scale
+      };
+      esp_eth_clock_adjtime(CLOCK_PTP_SYSTEM, &clk_adj_param);
+
+      /* Expose live values through ptpd_status() */
+      if (local_delta_ns > 0) {
+        state->drift_ppb = (long)((tick_diff * 1000000000LL) / local_delta_ns);
+      }
+    }
+  }
 
   state->remote_time_ns_prev = remote_time_ns;
   state->local_time_ns_prev = local_time_ns;
 
-  /* Expose live values through ptpd_status() */
   state->last_delta_ns = offset_ns;
-  if (local_delta_ns > 0) {
-    state->drift_ppb = (long)((tick_diff * 1000000000LL) / local_delta_ns);
-  }
 
-  ESP_LOGD(TAG, "remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
   ESP_LOGD(TAG, "offset_ns %lli, adj %li, drift_acc %li", offset_ns, adj, state->offset_pi.drift_acc);
 
   // Get the path delay only when clock is stable enough. If we were in process of adjustion (speeding/slowing slave),

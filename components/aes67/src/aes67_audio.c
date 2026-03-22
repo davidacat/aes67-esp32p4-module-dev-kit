@@ -324,7 +324,10 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, slot_mode),
     };
 
-    /* MCLK 384x matches the official ESP-IDF es8311 example */
+    /* Use APLL clock source for precise audio frequency control.
+     * APLL has SDM (Sigma-Delta Modulator) for sub-ppm tuning.
+     * ESP32-P4 Ethernet uses MPLL, so no APLL conflict. */
+    std_cfg.clk_cfg.clk_src = I2S_CLK_SRC_APLL;
     std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
 
     std_cfg.gpio_cfg = (i2s_std_gpio_config_t){

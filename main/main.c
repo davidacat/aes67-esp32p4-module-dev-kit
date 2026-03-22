@@ -284,7 +284,7 @@ static esp_err_t es8311_codec_init(void)
     }
 
     /* Set output volume (0-100) */
-    ret = es8311_voice_volume_set(codec, 80, NULL);
+    ret = es8311_voice_volume_set(codec, 20, NULL);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "ES8311 volume set failed: %s", esp_err_to_name(ret));
     }
@@ -447,15 +447,6 @@ void app_main(void)
 
         aes67_rtp_source_write(src_info.rtp_stream,
                                tone_buf, samples_per_packet);
-
-        /* Also write test tone to local I2S playback to verify speaker */
-        {
-            extern esp_err_t aes67_node_get_audio(aes67_node_handle_t handle,
-                                                   aes67_audio_handle_t *audio);
-            static aes67_audio_handle_t s_audio = NULL;
-            if (!s_audio) aes67_node_get_audio(node, &s_audio);
-            if (s_audio) aes67_audio_write_playback(s_audio, tone_buf, samples_per_packet);
-        }
 
         /* 1ms pacing. At IDLE+1 priority the scheduler will preempt
          * us for IDLE task watchdog resets. */

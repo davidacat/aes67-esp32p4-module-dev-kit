@@ -368,8 +368,10 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
     /* Start dedicated playback task AFTER running=true */
     {
         static TaskHandle_t pb_task = NULL;
+        /* Playback on core 0 to avoid competing with lwIP and RX on core 1.
+         * Priority 15 - below RTP RX (19) and lwIP task. */
         xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
-                                18, &pb_task, 1);
+                                15, &pb_task, 0);
     }
 
     /* Start the hardware PTP frame timer and audio frame task.

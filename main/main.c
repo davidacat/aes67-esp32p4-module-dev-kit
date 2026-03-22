@@ -449,8 +449,6 @@ void app_main(void)
         aes67_rtp_source_write(src_info.rtp_stream,
                                tone_buf, samples_per_packet);
 
-        /* Slow down TX to reduce EMAC contention with RX.
-         * At 10ms pacing we send 100 pkts/sec instead of 1000. */
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }

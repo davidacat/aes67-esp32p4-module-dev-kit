@@ -108,17 +108,28 @@ static void audio_frame_task(void *arg)
         aes67_rtp_engine_process_tx(node->rtp, rtp_ts);
 
         /* RX: Feed sink jitter buffer audio to I2S playback. */
-        int sink_count = aes67_session_get_sink_count(node->session);
-        for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
-            aes67_sink_t sink;
-            if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
-                sink.enabled && sink.rtp_stream) {
-                esp_err_t read_err = aes67_rtp_sink_read(sink.rtp_stream,
-                                                          playback_buf, spp);
-                if (read_err == ESP_OK) {
-                    aes67_audio_write_playback(node->audio, playback_buf, spp);
+        if (playback_buf) {
+            int sink_count = aes67_session_get_sink_count(node->session);
+            for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
+                aes67_sink_t sink;
+                if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
+                    sink.enabled && sink.rtp_stream) {
+                    esp_err_t read_err = aes67_rtp_sink_read(sink.rtp_stream,
+                                                              playback_buf, spp);
+                    if (read_err == ESP_OK) {
+                        aes67_audio_write_playback(node->audio, playback_buf, spp);
+                    }
+                    break;
                 }
-                break; /* Only play the first active sink for now */
+            }
+
+            /* Log playback status once */
+            if (frame_count == 500) {
+                int sc = aes67_session_get_sink_count(node->session);
+                uint32_t cap_frames = 0, play_frames = 0;
+                aes67_audio_get_buffer_levels(node->audio, &cap_frames, &play_frames);
+                ESP_LOGI(TAG, "TIC: sinks=%d, playback_buf=%p, play_ring=%lu, cap_ring=%lu",
+                         sc, playback_buf, (unsigned long)play_frames, (unsigned long)cap_frames);
             }
         }
     }

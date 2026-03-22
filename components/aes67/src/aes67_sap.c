@@ -399,8 +399,8 @@ esp_err_t aes67_sap_start(aes67_sap_handle_t handle)
         return err;
     }
 
-    /* Set multicast TTL and outgoing interface */
-    aes67_net_set_multicast_ttl(handle->sock, 32);
+    /* RFC 2974 requires SAP packets to have TTL=255 */
+    aes67_net_set_multicast_ttl(handle->sock, 255);
 
     /* Set the outgoing multicast interface to our local IP so packets
      * go out via Ethernet, not a random interface */

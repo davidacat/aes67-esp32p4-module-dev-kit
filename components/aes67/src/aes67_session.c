@@ -254,9 +254,18 @@ esp_err_t aes67_session_add_source(aes67_session_handle_t handle,
         return err;
     }
 
-    /* SAP announcement if enabled */
+    /* SAP announcement if enabled. Use CRC16 of the SDP text as
+     * the message ID hash, matching the Linux daemon convention. */
     if (mgr->config.sap_enabled && mgr->sap) {
-        err = aes67_sap_announce(mgr->sap, (uint16_t)sdp.session_id,
+        uint16_t msg_crc = 0xFFFF;
+        for (int i = 0; i < sdp_len; i++) {
+            msg_crc ^= (uint8_t)sdp_text[i];
+            for (int b = 0; b < 8; b++) {
+                if (msg_crc & 1) msg_crc = (msg_crc >> 1) ^ 0xA001;
+                else msg_crc >>= 1;
+            }
+        }
+        err = aes67_sap_announce(mgr->sap, msg_crc,
                                  local_ip, sdp_text);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "SAP announce failed for source '%s': %s",

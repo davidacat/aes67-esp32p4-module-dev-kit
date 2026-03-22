@@ -97,19 +97,28 @@ int aes67_sdp_generate(const aes67_sdp_t *sdp, char *buf, size_t buf_len)
                  sdp->ptp_grandmaster_id[6], sdp->ptp_grandmaster_id[7]);
     }
 
+    /* Compute samples per packet for the framecount attribute */
+    uint32_t framecount = (sdp->sample_rate * sdp->ptime_us) / 1000000;
+    if (framecount == 0) framecount = 48;
+
     int written = snprintf(buf, buf_len,
         "v=0\r\n"
         "o=%s %" PRIu32 " %" PRIu32 " IN IP4 %s\r\n"
         "s=%s\r\n"
-        "c=IN IP4 %s/%u\r\n"
+        "c=IN IP4 %s/32\r\n"
         "t=0 0\r\n"
         "m=audio %u RTP/AVP %u\r\n"
+        "i=Channels 1-%u\r\n"
+        "a=sync-time:0\r\n"
+        "a=framecount:%" PRIu32 "\r\n"
         "a=rtpmap:%u %s/%" PRIu32 "/%u\r\n"
         "a=ptime:%s\r\n",
         username, sdp->session_id, sdp->session_version, origin_ip_str,
         sdp->session_name,
-        conn_ip_str, sdp->ttl,
+        conn_ip_str,
         sdp->port, sdp->payload_type,
+        sdp->channels,
+        framecount,
         sdp->payload_type, codec_str, sdp->sample_rate, sdp->channels,
         ptime_str);
 
@@ -118,11 +127,19 @@ int aes67_sdp_generate(const aes67_sdp_t *sdp, char *buf, size_t buf_len)
         return -1;
     }
 
-    /* Append PTP reference clock attribute */
+    /* Append PTP reference clock attribute.
+     * Use "traceable" when the GM is known and traceable,
+     * otherwise include the specific GM identity. */
     if (sdp->has_ptp_refclk) {
-        int n = snprintf(buf + written, buf_len - written,
+        int n;
+        if (sdp->ptp_traceable) {
+            n = snprintf(buf + written, buf_len - written,
+                         "a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n");
+        } else {
+            n = snprintf(buf + written, buf_len - written,
                          "a=ts-refclk:ptp=IEEE1588-2008:%s:%u\r\n",
                          ptp_gm_str, sdp->ptp_domain);
+        }
         if (n < 0 || (size_t)(written + n) >= buf_len) {
             return -1;
         }
@@ -134,6 +151,17 @@ int aes67_sdp_generate(const aes67_sdp_t *sdp, char *buf, size_t buf_len)
         int n = snprintf(buf + written, buf_len - written,
                          "a=mediaclk:direct=%" PRIu32 "\r\n",
                          sdp->mediaclk_offset);
+        if (n < 0 || (size_t)(written + n) >= buf_len) {
+            return -1;
+        }
+        written += n;
+    }
+
+    /* Append clock domain */
+    {
+        int n = snprintf(buf + written, buf_len - written,
+                         "a=clock-domain:PTPv2 %u\r\n",
+                         sdp->ptp_domain);
         if (n < 0 || (size_t)(written + n) >= buf_len) {
             return -1;
         }

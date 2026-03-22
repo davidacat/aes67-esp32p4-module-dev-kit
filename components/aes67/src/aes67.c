@@ -127,11 +127,12 @@ static void playback_task(void *arg)
 {
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
 
-    /* Read 48 frames (1ms) to match SIENNA's packet size.
-     * With 16 DMA descriptors at 48 frames each = 768 frames = 16ms of
-     * DMA buffer, the per-write overhead is amortized. */
-    uint32_t spp = 48;
-    int32_t *buf = heap_caps_malloc(spp * node->config.audio.channels *
+    /* Read up to 480 frames (10ms) at a time. We drain whatever is
+     * available in the jitter buffer in one large i2s_channel_write
+     * to amortize the ~0.8ms per-call overhead. */
+    uint32_t max_frames = 480;
+    uint32_t spp = 48;  /* minimum read unit */
+    int32_t *buf = heap_caps_malloc(max_frames * node->config.audio.channels *
                                      sizeof(int32_t), MALLOC_CAP_INTERNAL);
     if (!buf) {
         ESP_LOGE(TAG, "Playback task: failed to allocate buffer");
@@ -168,20 +169,33 @@ static void playback_task(void *arg)
             }
         }
 
-        /* Read from jitter buffer and write to I2S. */
-        esp_err_t err = aes67_rtp_sink_read(cached_sink, buf, spp);
-        if (err == ESP_OK) {
-            aes67_audio_direct_write(node->audio, buf, spp);
-            static uint32_t pb_count = 0;
-            pb_count++;
-            if ((pb_count % 10000) == 0) {
-                ESP_LOGI(TAG, "Playback: %lu writes (%lu frames/sec approx)",
-                         (unsigned long)pb_count,
-                         (unsigned long)(pb_count * spp /
-                            (esp_timer_get_time() / 1000000)));
+        /* Batch-read from jitter buffer: accumulate up to max_frames
+         * before calling i2s_channel_write once. This amortizes the
+         * ~0.8ms per-call overhead of i2s_channel_write. */
+        uint32_t frames_batched = 0;
+        while (frames_batched + spp <= max_frames) {
+            int32_t *dst = buf + frames_batched * node->config.audio.channels;
+            esp_err_t err = aes67_rtp_sink_read(cached_sink, dst, spp);
+            if (err != ESP_OK) break;
+            frames_batched += spp;
+        }
+
+        if (frames_batched > 0) {
+            aes67_audio_direct_write(node->audio, buf, frames_batched);
+            static uint32_t total_frames = 0;
+            static uint32_t write_count = 0;
+            total_frames += frames_batched;
+            write_count++;
+            if ((write_count % 2000) == 0) {
+                int64_t elapsed_us = esp_timer_get_time();
+                ESP_LOGI(TAG, "Playback: %lu writes, %lu total frames "
+                         "(%lu frames/sec, avg %lu frames/write)",
+                         (unsigned long)write_count,
+                         (unsigned long)total_frames,
+                         (unsigned long)(total_frames * 1000000ULL / elapsed_us),
+                         (unsigned long)(total_frames / write_count));
             }
         } else {
-            /* Underrun - yield briefly */
             vTaskDelay(1);
         }
     }

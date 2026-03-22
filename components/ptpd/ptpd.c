@@ -670,13 +670,13 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
   state->remote_time_ns_prev = 0;
   state->local_time_ns_prev = 0;
 
-  /* PI controller gains matching linuxptp convention (multiplicative).
-   * Stored as fixed-point * 1000 to avoid floating point.
-   * kp=700 means 0.7: offset_ppb * 700 / 1000
-   * ki=300 means 0.3: offset_ppb * 300 / 1000
-   * These are the linuxptp hardware-timestamping defaults. */
-  state->offset_pi.kp = 700;   /* 0.7 as fixed-point *1000 */
-  state->offset_pi.ki = 300;   /* 0.3 as fixed-point *1000 */
+  /* PI controller gains (multiplicative, fixed-point * 1000).
+   * Softer than linuxptp defaults (0.7/0.3) because our system has
+   * ~250us path delay variation vs nanosecond-level in linuxptp.
+   * kp=100 means 0.1: gentle proportional, avoids overshoot
+   * ki=10 means 0.01: slow integral convergence, stable lock */
+  state->offset_pi.kp = 100;   /* 0.1 as fixed-point *1000 */
+  state->offset_pi.ki = 10;    /* 0.01 as fixed-point *1000 */
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;

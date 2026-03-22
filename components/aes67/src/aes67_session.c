@@ -269,6 +269,7 @@ esp_err_t aes67_session_add_source(aes67_session_handle_t handle,
 
     ESP_LOGI(TAG, "source '%s' added (id=%d, channels=%d, ssrc=0x%08lx)",
              name, slot, channels, (unsigned long)ssrc);
+    ESP_LOGI(TAG, "SDP:\n%s", sdp_text);
     return ESP_OK;
 }
 

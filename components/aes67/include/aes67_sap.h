@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 /* SAP multicast address and port per RFC 2974 */
-#define AES67_SAP_MCAST_ADDR   "239.255.255.255"
+#define AES67_SAP_MCAST_ADDR   "224.2.127.254"
 #define AES67_SAP_PORT         9875
 #define AES67_SAP_MAX_SDP_LEN  1024
 

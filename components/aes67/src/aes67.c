@@ -26,6 +26,7 @@
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"
 #include "driver/i2s_std.h"
+#include "soc/rtc.h"
 
 static const char *TAG = "aes67";
 
@@ -220,6 +221,7 @@ static void playback_task(void *arg)
          * MUST be non-blocking: any timeout breaks the DMA pacing loop
          * and causes progressive drift (miss rate increases over time). */
         static uint32_t real_count = 0, miss_count = 0;
+        static int32_t sdm0_adj = 0;
         size_t avail = xStreamBufferBytesAvailable(sbuf);
         if (avail >= 768) {
             xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
@@ -245,10 +247,49 @@ static void playback_task(void *arg)
         total_frames += frames;
         write_count++;
 
-        /* Adaptive clock recovery DISABLED: ESP32-P4 I2S fractional divider
-         * has only 3472 ppm resolution (denom=288). Each numerator step causes
-         * a 0.35% pitch shift -- far too coarse for smooth clock recovery.
-         * Need APLL or different clock source for sub-ppm adjustment. */
+        /* Adaptive APLL clock recovery: adjust sdm0 to match network rate.
+         * Each sdm0 step = ~4.1 ppm = ~0.20 Hz at 48kHz.
+         * Monitor stream buffer level: if growing, slow down; if empty, speed up. */
+        if ((write_count % 50) == 0 && write_count > 200) {
+            extern void rtc_clk_apll_coeff_set(uint32_t o_div, uint32_t sdm0,
+                                                uint32_t sdm1, uint32_t sdm2);
+            /* Read current buffer level */
+            size_t buf_level = xStreamBufferBytesAvailable(sbuf);
+            /* Target: ~1 packet (768 bytes) buffered */
+            /* sdm0_adj declared at function scope above */
+            if (buf_level > 768 * 2) {
+                /* Buffer growing: I2S too slow, speed up (decrease sdm0) */
+                sdm0_adj--;
+            } else if (buf_level == 0 && miss_count > real_count / 20) {
+                /* Buffer empty + high miss rate: I2S too fast, slow down */
+                sdm0_adj++;
+            }
+            /* Clamp to +/- 10 steps (~41 ppm max adjustment) */
+            if (sdm0_adj > 10) sdm0_adj = 10;
+            if (sdm0_adj < -10) sdm0_adj = -10;
+
+            /* Base coefficients for 36.864MHz (from APLL init):
+             * o_div=0, sdm2=3, sdm1=28, sdm0=147 (approximate)
+             * Read actual values from rtc_clk_apll_coeff_calc result.
+             * For now, adjust sdm0 relative to whatever the driver set. */
+            static bool base_read = false;
+            static uint32_t base_sdm0 = 0, base_sdm1 = 0, base_sdm2 = 0, base_o_div = 0;
+            if (!base_read) {
+                uint32_t real_freq = rtc_clk_apll_coeff_calc(
+                    36864000, &base_o_div, &base_sdm0, &base_sdm1, &base_sdm2);
+                ESP_LOGI(TAG, "APLL base: freq=%lu, o_div=%lu, sdm2=%lu, sdm1=%lu, sdm0=%lu",
+                         (unsigned long)real_freq, (unsigned long)base_o_div,
+                         (unsigned long)base_sdm2, (unsigned long)base_sdm1,
+                         (unsigned long)base_sdm0);
+                base_read = true;
+            }
+
+            int32_t new_sdm0 = (int32_t)base_sdm0 + sdm0_adj;
+            if (new_sdm0 < 0) new_sdm0 = 0;
+            if (new_sdm0 > 255) new_sdm0 = 255;
+            rtc_clk_apll_coeff_set(base_o_div, (uint32_t)new_sdm0,
+                                    base_sdm1, base_sdm2);
+        }
 
         if ((write_count % 1000) == 0) {
             int64_t el = esp_timer_get_time() - start_us;
@@ -258,7 +299,8 @@ static void playback_task(void *arg)
                          (unsigned long)(total_frames * 1000000ULL / el),
                          (unsigned long)miss_count,
                          total > 0 ? (float)miss_count * 100.0f / total : 0.0f,
-                         (unsigned)xStreamBufferBytesAvailable(sbuf));
+                         (unsigned)xStreamBufferBytesAvailable(sbuf),
+                         (long)sdm0_adj);
             }
         }
     }

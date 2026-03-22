@@ -497,27 +497,26 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
     /* Enable direct RTP RX -> staging ring path.
      * RTP RX task converts and writes to staging inline,
      * DMA ISR drains staging to I2S. No jitter buffer or playback task. */
+    /* Raw UDP PCB + stream buffer + playback task on core 0.
+     * L2 TAP captures ALL IPv4 frames, breaking PTP/SAP/mDNS.
+     * Instead, raw PCB handles RTP in lwIP context (core 1),
+     * playback task runs on core 0 at max priority (no preemption). */
     extern void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t h,
                                                void *audio);
     aes67_rtp_engine_set_playback(handle->rtp, handle->audio);
-    ESP_LOGI(TAG, "Direct RTP->I2S path enabled (zero-buffer)");
 
-    /* Start dedicated playback task AFTER running=true */
     {
         static TaskHandle_t pb_task = NULL;
-        /* Playback on core 1 at priority 20 (below lwIP 22, above RX 17).
-         * lwIP processes packets first, then playback drains the jitter
-         * buffer, then RX picks up from the socket. */
-        /* Playback on core 1 at priority 21 (above RTP RX 17, below lwIP 22).
-         * Was on core 0 where TIC task (prio 21) preempted it every 1ms. */
+        /* Core 0, priority 24 (higher than TIC at 21, higher than everything).
+         * This ensures the playback task runs IMMEDIATELY when
+         * i2s_channel_write returns, with no preemption delay. */
         xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
-                                21, &pb_task, 1);
-
-        /* Register playback task for notification from RTP RX */
+                                24, &pb_task, 0);
         extern void aes67_rtp_engine_set_notify_task(
             aes67_rtp_engine_handle_t h, TaskHandle_t task);
         aes67_rtp_engine_set_notify_task(handle->rtp, pb_task);
     }
+    ESP_LOGI(TAG, "Playback on core 0 prio 24 (isolated from lwIP)");
 
     /* Start the hardware PTP frame timer and audio frame task.
      * This task handles both TX and RX at PTP-aligned boundaries. */

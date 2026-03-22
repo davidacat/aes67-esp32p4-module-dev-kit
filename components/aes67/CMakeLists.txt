@@ -11,6 +11,7 @@ idf_component_register(
         "src/aes67_net.c"
         "src/aes67_mdns.c"
         "src/aes67_hw_timer.c"
+        "src/aes67_l2tap_rx.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS

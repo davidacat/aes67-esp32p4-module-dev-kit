@@ -30,7 +30,7 @@ static const char *TAG = "aes67_rtp";
 #define AES67_MAX_STREAMS       (CONFIG_AES67_MAX_SOURCES + CONFIG_AES67_MAX_SINKS)
 #define AES67_RX_TASK_STACK     4096
 #define AES67_RX_BUF_SIZE       2048
-#define AES67_JITTER_BUF_MULT   4
+#define AES67_JITTER_BUF_MULT   16  /* Must hold multiple large packets (192 frames/pkt) */
 
 /* Ring buffer for audio data. Single reader, single writer. */
 typedef struct {

@@ -247,6 +247,11 @@ static void playback_task(void *arg)
 
         total_frames += frames;
         write_count++;
+
+        /* TODO: adaptive clock recovery needs correct base divider values.
+         * Current implementation has wrong numerator causing 52kHz instead of 48kHz.
+         * Need to read actual divider from registers at startup. */
+
         if ((write_count % 1000) == 0) {
             int64_t el = esp_timer_get_time() - start_us;
             if (el > 0) {

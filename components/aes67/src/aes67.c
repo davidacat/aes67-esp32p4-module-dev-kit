@@ -107,32 +107,8 @@ static void audio_frame_task(void *arg)
          * convert to network format, send RTP packets */
         aes67_rtp_engine_process_tx(node->rtp, rtp_ts);
 
-        /* RX: Drain jitter buffer to I2S playback.
-         * Read one packet's worth of samples per TIC cycle. The I2S
-         * DMA has enough depth (8 descriptors) to buffer the data
-         * between TIC cycles. */
-        if (playback_buf) {
-            int sink_count = aes67_session_get_sink_count(node->session);
-            for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
-                aes67_sink_t sink;
-                if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
-                    sink.enabled && sink.rtp_stream) {
-
-                    extern esp_err_t aes67_audio_direct_write(
-                        aes67_audio_handle_t handle,
-                        const int32_t *samples, uint32_t frame_count);
-
-                    /* Read whatever is available, up to spp frames */
-                    esp_err_t read_err = aes67_rtp_sink_read(
-                        sink.rtp_stream, playback_buf, spp);
-                    if (read_err == ESP_OK) {
-                        aes67_audio_direct_write(node->audio,
-                                                  playback_buf, spp);
-                    }
-                    break;
-                }
-            }
-        }
+        /* RX playback is handled by a dedicated playback task.
+         * The TIC task only handles TX (source streams). */
     }
 
     ESP_LOGI(TAG, "Audio frame task stopped");
@@ -140,15 +116,67 @@ static void audio_frame_task(void *arg)
 }
 
 /*
- * Audio frame callback from I2S DMA. The I2S driver still captures
- * and plays audio via DMA, but the timing for RTP processing is now
- * driven by the hardware PTP timer through audio_frame_task.
+ * Dedicated playback task. Runs in a tight loop reading from the
+ * first active sink's jitter buffer and writing to I2S.
+ * i2s_channel_write blocks until DMA has room, which naturally
+ * paces output at 48kHz. This task is completely decoupled from
+ * both the RTP RX task and the TIC task.
+ */
+static void playback_task(void *arg)
+{
+    aes67_node_handle_t node = (aes67_node_handle_t)arg;
+
+    uint32_t spp = (node->config.audio.sample_rate *
+                     node->config.audio.packet_time_us) / 1000000;
+    int32_t *buf = heap_caps_malloc(spp * node->config.audio.channels *
+                                     sizeof(int32_t), MALLOC_CAP_INTERNAL);
+    if (!buf) {
+        ESP_LOGE(TAG, "Playback task: failed to allocate buffer");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    extern esp_err_t aes67_audio_direct_write(
+        aes67_audio_handle_t handle,
+        const int32_t *samples, uint32_t frame_count);
+
+    ESP_LOGI(TAG, "Playback task started (spp=%lu)", (unsigned long)spp);
+
+    while (node->running) {
+        /* Find first active sink */
+        bool found_data = false;
+        int sink_count = aes67_session_get_sink_count(node->session);
+        for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
+            aes67_sink_t sink;
+            if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
+                sink.enabled && sink.rtp_stream) {
+                esp_err_t err = aes67_rtp_sink_read(sink.rtp_stream, buf, spp);
+                if (err == ESP_OK) {
+                    /* Write to I2S - blocks until DMA accepts data.
+                     * This naturally paces at 48kHz sample rate. */
+                    aes67_audio_direct_write(node->audio, buf, spp);
+                    found_data = true;
+                }
+                break;
+            }
+        }
+
+        if (!found_data) {
+            /* No data available - yield briefly and try again */
+            vTaskDelay(1);
+        }
+    }
+
+    heap_caps_free(buf);
+    ESP_LOGI(TAG, "Playback task stopped");
+    vTaskDelete(NULL);
+}
+
+/*
+ * Audio frame callback from I2S DMA (unused - kept for API compat).
  */
 static void audio_frame_callback(uint32_t frame_count, void *user_data)
 {
-    /* I2S DMA callback - capture/playback data transfer is handled
-     * by the audio driver's I/O task. RTP timing is driven by the
-     * hardware PTP timer ISR -> audio_frame_task. */
 }
 
 esp_err_t aes67_node_init(const aes67_config_t *config, aes67_node_handle_t *handle)
@@ -295,12 +323,14 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
         return ret;
     }
 
-    /* Enable direct I2S playback from the RTP RX task.
-     * Received audio is written directly to I2S from the RX task
-     * context, giving the simplest and most reliable playback path. */
-    extern void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t handle,
-                                               void *audio_handle);
-    aes67_rtp_engine_set_playback(handle->rtp, handle->audio);
+    /* Start dedicated playback task on core 1 alongside the RX task.
+     * This drains the jitter buffer to I2S independently of both
+     * the RX task (which fills the buffer) and the TIC task (TX). */
+    {
+        static TaskHandle_t pb_task = NULL;
+        xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
+                                18, &pb_task, 1);
+    }
 
     if (handle->config.sap_enabled && handle->sap) {
         ret = aes67_sap_start(handle->sap);

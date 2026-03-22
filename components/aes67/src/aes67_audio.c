@@ -531,13 +531,25 @@ esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Write int32 samples directly to I2S TX channel, bypassing the
-     * playback ring buffer. Each int32 sample maps directly to a
-     * 32-bit I2S slot in Philips mode (left-justified).
-     * Use a longer timeout to ensure the DMA has time to accept data. */
     size_t bytes_written = 0;
-    size_t bytes_to_write = frame_count * handle->config.channels * sizeof(int32_t);
+    uint8_t ch = handle->config.channels;
 
+    /* If input is stereo but codec is mono (ES8311), mix L+R to mono
+     * by averaging both channels into the left slot. The ES8311 reads
+     * the left channel from the I2S Philips frame. */
+    if (ch == 2) {
+        /* Mix in-place: for each frame, average L and R into both slots */
+        int32_t *s = (int32_t *)samples;
+        for (uint32_t f = 0; f < frame_count; f++) {
+            int32_t left = s[f * 2];
+            int32_t right = s[f * 2 + 1];
+            int32_t mono = (left >> 1) + (right >> 1);  /* Average without overflow */
+            s[f * 2] = mono;
+            s[f * 2 + 1] = mono;
+        }
+    }
+
+    size_t bytes_to_write = frame_count * ch * sizeof(int32_t);
     esp_err_t ret = i2s_channel_write(handle->tx_chan, samples, bytes_to_write,
                                        &bytes_written, portMAX_DELAY);
 

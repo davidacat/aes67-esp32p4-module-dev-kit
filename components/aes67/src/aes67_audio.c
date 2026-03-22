@@ -24,8 +24,9 @@ static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA: 4 descriptors at 192 frames = 768 frames = 16ms. */
-#define DMA_DESC_NUM            4
+/* I2S DMA: 2 descriptors at 192 frames = 384 frames = 8ms.
+ * Minimum ping-pong. Less old data to replay on glitch. */
+#define DMA_DESC_NUM            2
 #define DMA_FRAME_NUM           192
 
 
@@ -305,7 +306,7 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
     chan_cfg.dma_frame_num = DMA_FRAME_NUM;
-    chan_cfg.auto_clear = false;   /* DMA replays last data on underrun (smoother than silence) */
+    chan_cfg.auto_clear = true;    /* Silence on gaps (diagnostic: is crackle from replay or gaps?) */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {

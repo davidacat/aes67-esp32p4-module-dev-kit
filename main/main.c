@@ -193,6 +193,23 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
     const uint8_t *payload = buffer + payload_off;
     int payload_len = length - payload_off;
 
+    /* Handle RTP padding (P bit) */
+    if (buffer[rtp_off] & 0x20) {
+        uint8_t pad_len = buffer[length - 1];
+        payload_len -= pad_len;
+        if (payload_len <= 0) goto forward;
+    }
+
+    /* Use UDP length field instead of Ethernet frame length to avoid
+     * including Ethernet FCS or padding bytes in the audio data.
+     * UDP length = header(8) + payload. */
+    uint16_t udp_len = (buffer[udp_off + 4] << 8) | buffer[udp_off + 5];
+    int rtp_total = udp_len - 8;  /* UDP payload = RTP header + RTP payload */
+    int rtp_payload = rtp_total - (payload_off - rtp_off);
+    if (rtp_payload > 0 && rtp_payload < payload_len) {
+        payload_len = rtp_payload;  /* Trim to actual RTP payload */
+    }
+
     /* L24 stereo: 6 bytes per frame */
     int frames = payload_len / 6;
     if (frames <= 0 || frames > 192) goto forward;
@@ -206,8 +223,7 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
         s_hook_i16[i*2+1] = s16;
     }
 
-    /* Write to stream buffer (non-blocking, 0 timeout).
-     * The playback task reads and writes to I2S with DMA pacing. */
+    /* Write converted audio to stream buffer */
     if (s_hook_sbuf) {
         xStreamBufferSend(s_hook_sbuf, s_hook_i16,
                            frames * 2 * sizeof(int16_t), 0);
@@ -396,7 +412,7 @@ static esp_err_t es8311_codec_init(void)
         return ret;
     }
 
-    ret = es8311_voice_volume_set(codec, 50, NULL);
+    ret = es8311_voice_volume_set(codec, 70, NULL);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "ES8311 volume set failed: %s", esp_err_to_name(ret));
     }

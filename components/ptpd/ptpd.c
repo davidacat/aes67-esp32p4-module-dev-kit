@@ -1245,12 +1245,30 @@ static int ptp_process_announce(FAR struct ptp_state_s *state,
 {
   clock_gettime(CLOCK_MONOTONIC, &state->last_received_announce);
 
-  if (is_better_clock(msg, &state->own_identity))
+  /* Log every announce we receive so we can see all GMs on the network */
+  bool better = is_better_clock(msg, &state->own_identity);
+  ESP_LOGI(TAG, "Announce from GM %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X "
+           "(p1=%u, class=%u, acc=%u, p2=%u) %s",
+           msg->gm_identity[0], msg->gm_identity[1],
+           msg->gm_identity[2], msg->gm_identity[3],
+           msg->gm_identity[4], msg->gm_identity[5],
+           msg->gm_identity[6], msg->gm_identity[7],
+           msg->gm_priority1,
+           msg->gm_quality[0],   /* clock class */
+           msg->gm_quality[1],   /* clock accuracy */
+           msg->gm_priority2,
+           better ? "<- BETTER than us" : "(not better)");
+
+  if (better)
     {
       if (!state->selected_source_valid ||
           is_better_clock(msg, &state->selected_source))
         {
-          ptpinfo("Switching to better PTP time source\n");
+          ESP_LOGI(TAG, "Selecting GM %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X as clock source",
+                   msg->gm_identity[0], msg->gm_identity[1],
+                   msg->gm_identity[2], msg->gm_identity[3],
+                   msg->gm_identity[4], msg->gm_identity[5],
+                   msg->gm_identity[6], msg->gm_identity[7]);
 
           state->selected_source = *msg;
           state->last_received_sync = state->last_received_announce;

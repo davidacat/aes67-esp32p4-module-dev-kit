@@ -293,7 +293,10 @@ esp_err_t aes67_ptp_init(esp_eth_handle_t eth_handle, const aes67_ptp_config_t *
         return ret;
     }
 
-    ESP_LOGI(TAG, "PTP subsystem initialized (domain %u, dscp %u)", config->domain, config->dscp);
+    ESP_LOGI(TAG, "PTP initialized (domain %u, own ID: %02X-%02X-%02X-FF-FE-%02X-%02X-%02X)",
+             config->domain,
+             ctx->own_mac[0], ctx->own_mac[1], ctx->own_mac[2],
+             ctx->own_mac[3], ctx->own_mac[4], ctx->own_mac[5]);
     *handle = ctx;
     return ESP_OK;
 }

@@ -127,11 +127,8 @@ static void playback_task(void *arg)
 {
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
 
-    /* Read up to 4800 frames (100ms) to maximize i2s_channel_write
-     * efficiency. Each call has ~5ms fixed overhead regardless of
-     * data size, so larger batches amortize better. */
     uint32_t max_frames = 4800;
-    uint32_t spp = 48;  /* minimum read unit */
+    uint32_t spp = 48;  /* jitter buffer read unit */
     int32_t *buf = heap_caps_malloc(max_frames * node->config.audio.channels *
                                      sizeof(int32_t), MALLOC_CAP_INTERNAL);
     if (!buf) {
@@ -149,10 +146,12 @@ static void playback_task(void *arg)
     /* Cache the sink stream handle to avoid mutex contention with
      * session manager on every iteration (1000 times/sec). */
     aes67_rtp_stream_handle_t cached_sink = NULL;
+    bool prefilled = false;
 
     while (node->running) {
         /* Look up sink handle only if not cached */
         if (!cached_sink) {
+            prefilled = false;
             int sink_count = aes67_session_get_sink_count(node->session);
             for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
                 aes67_sink_t sink;
@@ -175,10 +174,17 @@ static void playback_task(void *arg)
             }
         }
 
-        /* Drain all available data from jitter buffer into a batch,
-         * then write it all in one i2s_channel_write call.
-         * No artificial waiting -- i2s_channel_write blocks until
-         * DMA consumes the data, which naturally paces at 48kHz. */
+        /* Prefill: let the jitter buffer accumulate before we start
+         * draining it. DMA auto_clear outputs silence until we write. */
+        if (!prefilled) {
+            vTaskDelay(pdMS_TO_TICKS(150));
+            prefilled = true;
+            ESP_LOGI(TAG, "Playback: prefill done (150ms), starting output");
+        }
+
+        /* Drain all available data from jitter buffer.
+         * Write only real audio -- no silence padding.
+         * DMA auto_clear handles underruns at the hardware level. */
         uint32_t frames_batched = 0;
         while (frames_batched + spp <= max_frames) {
             int32_t *dst = buf + frames_batched * node->config.audio.channels;
@@ -221,7 +227,9 @@ static void playback_task(void *arg)
                          (unsigned long)(total_frames / write_count));
             }
         } else {
-            vTaskDelay(1);
+            /* No data -- DMA auto_clear outputs silence.
+             * Brief sleep to avoid busy-looping. */
+            vTaskDelay(pdMS_TO_TICKS(2));
         }
     }
 

@@ -19,6 +19,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -79,7 +80,14 @@ static void audio_frame_task(void *arg)
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
     uint32_t frame_count = 0;
 
-    ESP_LOGI(TAG, "Audio frame task started (PTP hw-timed, TX+RX)");
+    /* Pre-allocate playback buffer for sink -> I2S path */
+    uint32_t spp = (node->config.audio.sample_rate *
+                     node->config.audio.packet_time_us) / 1000000;
+    int32_t *playback_buf = heap_caps_malloc(
+        spp * node->config.audio.channels * sizeof(int32_t),
+        MALLOC_CAP_INTERNAL);
+
+    ESP_LOGI(TAG, "Audio frame task started (hw-timed TX+RX)");
 
     while (node->running) {
         /* Wait for the hardware PTP frame timer ISR */
@@ -99,13 +107,7 @@ static void audio_frame_task(void *arg)
          * convert to network format, send RTP packets */
         aes67_rtp_engine_process_tx(node->rtp, rtp_ts);
 
-        /* RX: Feed sink jitter buffer audio to I2S playback.
-         * Read from the first active sink stream and write to the
-         * audio playback ring buffer for I2S DMA output. */
-        uint32_t spp = (node->config.audio.sample_rate *
-                         node->config.audio.packet_time_us) / 1000000;
-        int32_t playback_buf[CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 48];
-
+        /* RX: Feed sink jitter buffer audio to I2S playback. */
         int sink_count = aes67_session_get_sink_count(node->session);
         for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
             aes67_sink_t sink;
@@ -319,7 +321,7 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
     ret = aes67_hw_timer_start();
     if (ret == ESP_OK) {
         BaseType_t xret = xTaskCreatePinnedToCore(
-            audio_frame_task, "aes67_tic", 4096, handle,
+            audio_frame_task, "aes67_tic", 8192, handle,
             21,     /* High priority, just below audio I/O (22) */
             &handle->tx_task,
             0       /* Pin to core 0 (PTP/network core) */

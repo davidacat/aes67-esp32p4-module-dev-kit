@@ -180,6 +180,17 @@ static void playback_task(void *arg)
         }
 
         if (frames_batched > 0) {
+            /* Mix stereo to mono for the ES8311 single-speaker output.
+             * Do this on our own buffer, not the ring buffer data. */
+            if (node->config.audio.channels == 2) {
+                for (uint32_t f = 0; f < frames_batched; f++) {
+                    int32_t left = buf[f * 2];
+                    int32_t right = buf[f * 2 + 1];
+                    int32_t mono = (left >> 1) + (right >> 1);
+                    buf[f * 2] = mono;
+                    buf[f * 2 + 1] = mono;
+                }
+            }
             aes67_audio_direct_write(node->audio, buf, frames_batched);
             static uint32_t total_frames = 0;
             static uint32_t write_count = 0;

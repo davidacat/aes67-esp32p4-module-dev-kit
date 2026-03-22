@@ -159,6 +159,7 @@ struct ptp_state_s
 #ifdef ESP_PTP
   uint8_t intf_hw_addr[ETH_ADDR_LEN];
   int ptp_socket;
+  esp_eth_handle_t cached_eth_handle;  /* Cached for freq adj calls */
 
   int64_t remote_time_ns_prev;
   int64_t local_time_ns_prev;
@@ -643,6 +644,7 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
     ptperr("failed to get socket eth_handle %d\n", errno);
     return ERROR;
   }
+  state->cached_eth_handle = eth_handle;
   esp_eth_clock_cfg_t clk_cfg = {
     .eth_hndl = eth_handle,
   };
@@ -1403,12 +1405,14 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   if (adj_ppb > 500000) adj_ppb = 500000;
   if (adj_ppb < -500000) adj_ppb = -500000;
 
-  /* Use the ppb-based API which is idempotent: it always computes the
+  /* Use the ppb-based API (ETH_MAC_ESP_CMD_ADJ_PTP_TIME) which calls
+   * emac_hal_ptp_adj_inc. This is idempotent: it always computes the
    * new addend relative to the stored base addend, avoiding the
    * compounding problem of the freq_scale API. */
-  esp_eth_handle_t eth_handle;
-  if (ioctl(state->ptp_socket, L2TAP_G_DEVICE_DRV_HNDL, &eth_handle) == 0) {
-    esp_eth_ioctl(eth_handle, ETH_MAC_ESP_CMD_ADJ_PTP_TIME, &adj_ppb);
+  esp_err_t adj_err = esp_eth_ioctl(state->cached_eth_handle,
+                                     ETH_MAC_ESP_CMD_ADJ_PTP_TIME, &adj_ppb);
+  if (adj_err != ESP_OK) {
+    ESP_LOGW(TAG, "PTP freq adj failed: %s", esp_err_to_name(adj_err));
   }
 
   /* Track timestamps for drift measurement */

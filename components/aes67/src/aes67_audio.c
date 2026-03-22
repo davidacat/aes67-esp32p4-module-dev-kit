@@ -294,16 +294,16 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
                                     : I2S_SLOT_MODE_STEREO; /* TDM handled separately if needed */
 
     i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio_config->sample_rate),
+        .clk_cfg = {
+            .sample_rate_hz = audio_config->sample_rate,
+            .clk_src = I2S_CLK_SRC_APLL,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_384,
+        },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bit_width, slot_mode),
     };
 
-    /* For 24-bit audio the MCLK multiple must be divisible by 3.
-     * The default (256) is not, so use 384 = 256 * 1.5 which works
-     * for both 16-bit and 24-bit. */
-    if (audio_config->word_length == 3) {
-        std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
-    }
+    /* MCLK multiple already set to 384 in clk_cfg above.
+     * 384 is divisible by 3 (required for 24-bit) and works for all bit depths. */
 
     std_cfg.gpio_cfg = (i2s_std_gpio_config_t){
         .mclk = pins->mck_gpio,

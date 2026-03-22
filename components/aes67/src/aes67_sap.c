@@ -111,7 +111,7 @@ static esp_err_t send_sap_packet(int sock, const uint8_t *pkt, int pkt_len)
                  AES67_SAP_PORT, errno);
         return ESP_FAIL;
     }
-    ESP_LOGD(TAG, "SAP packet sent (%d bytes to 224.2.127.254:%d)",
+    ESP_LOGI(TAG, "SAP sent %d bytes to 224.2.127.254:%d",
              sent, AES67_SAP_PORT);
     return ESP_OK;
 }

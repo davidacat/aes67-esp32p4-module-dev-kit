@@ -203,8 +203,10 @@ static void playback_task(void *arg)
          *
          * The i2s_channel_write blocking IS the 48kHz pacing mechanism.
          * With auto_clear=false, if we don't write, DMA replays old audio. */
-        int16_t pcm_buf[192 * 2];
-        static int16_t prev_buf[192 * 2];
+        /* 24-bit I2S uses int32 (left-justified) per sample */
+        const uint32_t pkt_bytes = 192 * ch * sizeof(int32_t);  /* 1536 bytes */
+        static int32_t pcm_buf[192 * 2];   /* Static to avoid stack overflow */
+        static int32_t prev_buf[192 * 2];
         static bool have_prev = false;
         uint32_t frames = 192;
 
@@ -212,22 +214,17 @@ static void playback_task(void *arg)
         i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
 
         if (have_prev && tx) {
-            /* Step 1: Write PREVIOUS packet to I2S. This BLOCKS for ~4ms
-             * until DMA finishes playing a descriptor and frees it. */
             size_t written = 0;
-            i2s_channel_write(tx, prev_buf, frames * ch * sizeof(int16_t),
+            i2s_channel_write(tx, prev_buf, pkt_bytes,
                               &written, portMAX_DELAY);
         }
 
-        /* Step 2: Read new data from stream buffer (non-blocking).
-         * Raw callback should have written during the ~4ms block above. */
         size_t avail = xStreamBufferBytesAvailable(sbuf);
-        if (avail >= 768) {
-            xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
-            memcpy(prev_buf, pcm_buf, 768);
+        if (avail >= pkt_bytes) {
+            xStreamBufferReceive(sbuf, pcm_buf, pkt_bytes, 0);
+            memcpy(prev_buf, pcm_buf, pkt_bytes);
             have_prev = true;
         } else if (!have_prev) {
-            /* No data yet, wait for first packet */
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
@@ -462,7 +459,7 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
          * buffer, then RX picks up from the socket. */
         /* Playback on core 1 at priority 21 (above RTP RX 17, below lwIP 22).
          * Was on core 0 where TIC task (prio 21) preempted it every 1ms. */
-        xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
+        xTaskCreatePinnedToCore(playback_task, "aes67_pb", 8192, handle,
                                 21, &pb_task, 1);
 
         /* Register playback task for notification from RTP RX */

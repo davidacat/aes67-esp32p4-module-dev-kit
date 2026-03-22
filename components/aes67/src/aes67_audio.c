@@ -24,9 +24,9 @@ static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA: 2 descriptors at 192 frames = 384 frames = 8ms.
- * Minimum ping-pong. Less old data to replay on glitch. */
-#define DMA_DESC_NUM            2
+/* I2S DMA: 4 descriptors at 192 frames = 768 frames = 16ms.
+ * v1.1.0 setting. */
+#define DMA_DESC_NUM            4
 #define DMA_FRAME_NUM           192
 
 
@@ -306,7 +306,7 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
     chan_cfg.dma_frame_num = DMA_FRAME_NUM;
-    chan_cfg.auto_clear = true;    /* Silence on gaps (diagnostic: is crackle from replay or gaps?) */
+    chan_cfg.auto_clear = false;   /* v1.1.0 setting: DMA pacing via write blocking */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {
@@ -317,12 +317,11 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     /* Map word_length to I2S bit depth */
     i2s_slot_mode_t slot_mode = I2S_SLOT_MODE_STEREO;
 
-    /* Use 16-bit I2S to match the working ESP32-P4-NANO reference example.
-     * Our internal format is int32 but we convert to int16 before writing
-     * to the DMA via direct_write. */
+    /* 32-bit I2S: int32 maps directly to DMA, no conversion needed.
+     * ES8311 supports 32-bit (SDP_IN_WL = 100). */
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio_config->sample_rate),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, slot_mode),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, slot_mode),
     };
 
     /* Use APLL clock source for precise audio frequency control.
@@ -588,19 +587,14 @@ esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
         frame_count = total_samples / handle->config.channels;
     }
 
-    /* Convert int32 (left-justified 24-bit) to int16 for the I2S DMA.
-     * Take the upper 16 bits of each 32-bit sample. Uses the
-     * pre-allocated buffer to avoid malloc/free per call. */
-    int16_t *i2s_buf = handle->i2s_conv_buf;
-    for (uint32_t i = 0; i < total_samples; i++) {
-        i2s_buf[i] = (int16_t)(samples[i] >> 16);
-    }
-
+    /* With 24-bit I2S (32-bit slots), write int32 directly to DMA.
+     * The L24 conversion already produces left-justified int32.
+     * No truncation needed -- full 24-bit quality preserved. */
     size_t bytes_written = 0;
-    size_t bytes_to_write = total_samples * sizeof(int16_t);
+    size_t bytes_to_write = total_samples * sizeof(int32_t);
 
     int64_t t0 = esp_timer_get_time();
-    esp_err_t ret = i2s_channel_write(handle->tx_chan, i2s_buf, bytes_to_write,
+    esp_err_t ret = i2s_channel_write(handle->tx_chan, samples, bytes_to_write,
                                        &bytes_written, portMAX_DELAY);
     int64_t t1 = esp_timer_get_time();
 
@@ -629,8 +623,8 @@ esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
                  (long long)(last_end_us > 0 ? (t0 - (last_end_us - (t1 - t0))) : 0),
                  (long)samples[0], (long)samples[1],
                  (long)samples[2], (long)samples[3],
-                 (int)i2s_buf[0], (int)i2s_buf[1],
-                 (int)i2s_buf[2], (int)i2s_buf[3]);
+                 (long)samples[0], (long)samples[1],
+                 (long)samples[2], (long)samples[3]);
     }
 
     return ret;

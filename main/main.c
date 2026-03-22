@@ -214,19 +214,20 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
     int frames = payload_len / 6;
     if (frames <= 0 || frames > 192) goto forward;
 
-    /* Convert L24 -> int32 -> mono mix -> int16 stereo */
+    /* Convert L24 -> int32 (left-justified, ready for 24-bit I2S).
+     * Left channel only for mono output to ES8311 single speaker.
+     * Write int32 directly -- no 16-bit truncation. */
     aes67_convert_from_net(payload, s_hook_tmp32, frames, 2, 3);
     for (int i = 0; i < frames; i++) {
-        int32_t mono = (s_hook_tmp32[i*2] >> 1) + (s_hook_tmp32[i*2+1] >> 1);
-        int16_t s16 = (int16_t)(mono >> 16);
-        s_hook_i16[i*2] = s16;
-        s_hook_i16[i*2+1] = s16;
+        int32_t left = s_hook_tmp32[i * 2];
+        s_hook_tmp32[i * 2]     = left;  /* L channel */
+        s_hook_tmp32[i * 2 + 1] = left;  /* R = L for mono */
     }
 
-    /* Write converted audio to stream buffer */
+    /* Write int32 stereo to stream buffer */
     if (s_hook_sbuf) {
-        xStreamBufferSend(s_hook_sbuf, s_hook_i16,
-                           frames * 2 * sizeof(int16_t), 0);
+        xStreamBufferSend(s_hook_sbuf, s_hook_tmp32,
+                           frames * 2 * sizeof(int32_t), 0);
     }
 
     s_hook_pkt_count++;
@@ -316,22 +317,13 @@ static esp_err_t ethernet_init(esp_eth_handle_t *out_eth_handle)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
                                                &ip_event_handler, NULL));
 
-    /* Install Ethernet RTP hook: intercept RTP multicast before lwIP.
-     * Save the original handler (eth_input_to_netif) set by netif glue,
-     * then replace with our hook that chains to original for non-RTP. */
-    s_original_priv = eth_netif;  /* Original priv is the esp_netif_t */
-    /* The glue sets eth_input_to_netif as the callback. We need to get
-     * a reference to it. Since esp_netif_receive is the lwIP entry point,
-     * we store the netif and call esp_netif_receive directly in the forward path. */
-
-    /* Allocate conversion buffers for the hook (internal SRAM) */
+    /* Ethernet RTP hook: intercept RTP at MAC level before lwIP */
+    s_original_priv = eth_netif;
     s_hook_tmp32 = heap_caps_malloc(192 * 2 * sizeof(int32_t), MALLOC_CAP_INTERNAL);
     s_hook_i16 = heap_caps_malloc(192 * 2 * sizeof(int16_t),
                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-
-    /* Replace the input callback with our hook */
     esp_eth_update_input_path_info(eth_handle, eth_rtp_hook, eth_netif);
-    ESP_LOGI(TAG, "Ethernet RTP hook installed (intercepts port 5004 before lwIP)");
+    ESP_LOGI(TAG, "Ethernet RTP hook installed");
 
     /* Start Ethernet */
     ret = esp_eth_start(eth_handle);
@@ -405,8 +397,8 @@ static esp_err_t es8311_codec_init(void)
         .sample_frequency = 48000,
     };
 
-    /* 16-bit resolution matching the I2S slot width */
-    ret = es8311_init(codec, &clk_cfg, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16);
+    /* 32-bit resolution -- int32 maps directly, no truncation */
+    ret = es8311_init(codec, &clk_cfg, ES8311_RESOLUTION_32, ES8311_RESOLUTION_32);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ES8311 init failed: %s", esp_err_to_name(ret));
         return ret;
@@ -496,8 +488,10 @@ void app_main(void)
      * This enables I2S which starts MCLK generation. */
     ESP_ERROR_CHECK(aes67_node_start(node));
 
-    /* Create stream buffer for Ethernet hook -> playback task path */
-    s_hook_sbuf = xStreamBufferCreate(12288, 768);
+    /* Create stream buffer for Ethernet hook -> playback task path.
+     * int32 stereo: 192 frames * 2ch * 4 bytes = 1536 bytes per packet.
+     * Buffer holds 8 packets (12288 bytes). Trigger at 1536 (one packet). */
+    s_hook_sbuf = xStreamBufferCreate(12288, 1536);
 
     /* Set up the Ethernet hook's I2S channel (for stats, not direct write) */
     {

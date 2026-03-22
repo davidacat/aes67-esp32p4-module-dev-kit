@@ -20,6 +20,7 @@
 #include "esp_log.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -165,11 +166,18 @@ static void playback_task(void *arg)
             }
         }
 
-        /* Read from jitter buffer and write to I2S.
-         * No mutex, no session manager lookup - direct ring buffer access. */
+        /* Read from jitter buffer and write to I2S. */
         esp_err_t err = aes67_rtp_sink_read(cached_sink, buf, spp);
         if (err == ESP_OK) {
             aes67_audio_direct_write(node->audio, buf, spp);
+            static uint32_t pb_count = 0;
+            pb_count++;
+            if ((pb_count % 10000) == 0) {
+                ESP_LOGI(TAG, "Playback: %lu writes (%lu frames/sec approx)",
+                         (unsigned long)pb_count,
+                         (unsigned long)(pb_count * spp /
+                            (esp_timer_get_time() / 1000000)));
+            }
         } else {
             /* Underrun - yield briefly */
             vTaskDelay(1);

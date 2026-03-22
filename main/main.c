@@ -286,11 +286,20 @@ static esp_err_t es8311_codec_init(void)
         ESP_LOGW(TAG, "ES8311 volume set failed: %s", esp_err_to_name(ret));
     }
 
+    /* Unmute DAC output */
+    ret = es8311_voice_mute(codec, false);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ES8311 unmute failed: %s", esp_err_to_name(ret));
+    }
+
     /* Configure microphone: analog mic, 24dB gain */
     es8311_microphone_config(codec, false);
     es8311_microphone_gain_set(codec, ES8311_MIC_GAIN_24DB);
 
-    ESP_LOGI(TAG, "ES8311 codec initialized (48kHz, 24-bit, vol=80)");
+    /* Dump ES8311 register state for debugging */
+    es8311_register_dump(codec);
+
+    ESP_LOGI(TAG, "ES8311 codec initialized (48kHz, 24-bit, vol=80, unmuted)");
     return ESP_OK;
 }
 

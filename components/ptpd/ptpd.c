@@ -1388,6 +1388,25 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   int64_t offset_ns = timespec_delta_ns(remote_timestamp, local_timestamp);
   offset_ns += state->path_delay_ns;
 
+  /* Outlier filter: reject measurements where the offset changes by
+   * more than 2ms from the previous sample. These are caused by network
+   * jitter (delayed packets), not real clock error. Skip adjustment
+   * but still update timestamps for the next cycle. */
+  if (state->last_offset_ns != 0) {
+    int64_t delta = offset_ns - state->last_offset_ns;
+    if (delta > 2000000LL || delta < -2000000LL) {
+      ESP_LOGD(TAG, "Outlier filtered: offset %+lld ns (prev %+lld, delta %+lld)",
+               offset_ns, state->last_offset_ns, delta);
+      /* Update prev timestamps but skip PI adjustment */
+      state->remote_time_ns_prev = timespec_to_ns(remote_timestamp);
+      state->local_time_ns_prev = timespec_to_ns(local_timestamp);
+      state->last_offset_ns = offset_ns;
+      state->last_delta_ns = offset_ns;
+      return;
+    }
+  }
+  state->last_offset_ns = offset_ns;
+
   /* Compute the actual sync interval for proper ppb scaling.
    * offset_ns is error in nanoseconds. To convert to ppb (ns/s),
    * we need to know the measurement interval. */

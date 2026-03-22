@@ -123,8 +123,8 @@ static void audio_frame_task(void *arg)
                 }
             }
 
-            /* Log playback status once */
-            if (frame_count == 500) {
+            /* Log playback status periodically */
+            if (frame_count == 500 || frame_count == 15000 || frame_count == 30000) {
                 int sc = aes67_session_get_sink_count(node->session);
                 uint32_t cap_frames = 0, play_frames = 0;
                 aes67_audio_get_buffer_levels(node->audio, &cap_frames, &play_frames);

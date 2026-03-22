@@ -672,11 +672,14 @@ static int ptp_initialize_state(FAR struct ptp_state_s *state,
 
   /* PI controller gains for ppb-based frequency lock.
    * These divide offset_ns to produce a ppb adjustment value.
-   * With 1s sync interval and typical crystal drift of 20-50ppm:
-   * kp=200: 1ms offset -> 5000 ppb (5 ppm) proportional correction
-   * ki=2000: 1ms offset -> 500 ppb (0.5 ppm) integral per cycle */
-  state->offset_pi.kp = 200;
-  state->offset_pi.ki = 2000;
+   * With 1s sync interval:
+   * kp=50: 1ms offset -> 20000 ppb (20 ppm) proportional correction
+   * ki=500: 1ms offset -> 2000 ppb (2 ppm) integral per cycle
+   *
+   * The integral slowly converges to the true crystal drift
+   * while the proportional provides fast initial response. */
+  state->offset_pi.kp = 50;
+  state->offset_pi.ki = 500;
   state->offset_pi.drift_acc = 0;
 
   state->own_identity.header.version = 2;

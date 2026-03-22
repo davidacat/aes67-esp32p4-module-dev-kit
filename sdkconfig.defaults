@@ -38,11 +38,13 @@ CONFIG_LWIP_SO_RCVBUF=y
 CONFIG_LWIP_NETBUF_RECVINFO=y
 CONFIG_LWIP_IP_DEFAULT_TTL=64
 
-# Larger UDP receive buffer for RTP/PTP packet bursts
-CONFIG_LWIP_UDP_RECVMBOX_SIZE=32
+# Larger UDP receive mailbox for RTP packet bursts
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
 
-# Larger TCP/IP task stack and higher priority
-CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32
+# lwIP TCP/IP task must be highest priority on core 1 so it can
+# process incoming Ethernet frames without being starved by RX task
+CONFIG_LWIP_TCPIP_TASK_PRIO=22
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096
 CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU1=y
 

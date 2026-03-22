@@ -553,14 +553,17 @@ esp_err_t aes67_rtp_engine_start(aes67_rtp_engine_handle_t handle)
     engine->running = true;
 
     /* Start the RX task */
+    /* RX task priority must be BELOW lwIP (22) so lwIP can process
+     * incoming Ethernet frames. RX task runs when lwIP delivers
+     * data to the socket, not the other way around. */
     BaseType_t ret = xTaskCreatePinnedToCore(
         rx_task_func,
         "aes67_rx",
         AES67_RX_TASK_STACK,
         engine,
-        CONFIG_AES67_TASK_PRIORITY_RTP,
+        17,  /* Below lwIP (22) on core 1 */
         &engine->rx_task,
-        1   /* Pin to core 1 to avoid contention with audio on core 0 */
+        1
     );
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create RX task");

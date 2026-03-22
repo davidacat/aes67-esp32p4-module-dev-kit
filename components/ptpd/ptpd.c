@@ -1429,9 +1429,10 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
    * I term: leaky integrator that converges to steady-state drift */
   int32_t p_term = (int32_t)(offset_ppb / state->offset_pi.kp);
 
-  /* Leaky integrator (like RAVENNA): decay by 2% each cycle to prevent
-   * windup, then add new error contribution */
-  state->offset_pi.drift_acc = (state->offset_pi.drift_acc * 98) / 100;
+  /* Leaky integrator: decay by 0.5% each cycle. This allows the integral
+   * to fully converge on the true crystal drift while still preventing
+   * windup from transient errors. */
+  state->offset_pi.drift_acc = (state->offset_pi.drift_acc * 199) / 200;
   state->offset_pi.drift_acc += (int32_t)(offset_ppb / state->offset_pi.ki);
 
   /* Clamp I term to +/- 50 ppm (real crystal drift range) */

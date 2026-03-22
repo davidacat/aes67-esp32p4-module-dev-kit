@@ -785,12 +785,14 @@ esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,
             continue;
         }
 
-        /* Derive the RTP timestamp from PTP time, quantized to
-         * samples_per_packet boundaries. This ensures the timestamp
-         * is always a multiple of the packet size (required by AES67)
-         * while staying aligned with the network SAC. */
-        uint32_t spp = s->samples_per_packet;
-        uint32_t quantized_ts = (rtp_timestamp / spp) * spp;
+        /* Initialize stream timestamp from PTP on first TX, then
+         * increment sequentially. The receiver validates that each
+         * packet's timestamp = prev_timestamp + prev_sample_count.
+         * (RAVENNA RTP_audio_stream.c line 647) */
+        if (!s->timestamp_initialized) {
+            s->rtp_timestamp = rtp_timestamp;
+            s->timestamp_initialized = true;
+        }
 
         /* Ring buffer stores int32_t samples (4 bytes each, native endian).
          * Read them into a temp area, then convert to packed network order. */
@@ -851,8 +853,9 @@ esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,
         }
 
         rtp_build_header(pkt, s->config.payload_type, s->seq_num,
-                         quantized_ts, s->ssrc);
+                         s->rtp_timestamp, s->ssrc);
         s->seq_num++;
+        s->rtp_timestamp += s->samples_per_packet;
 
         /* Send the packet */
         uint32_t pkt_size = AES67_RTP_HEADER_SIZE + s->packet_payload_size;

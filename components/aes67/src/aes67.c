@@ -323,15 +323,6 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
         return ret;
     }
 
-    /* Start dedicated playback task on core 1 alongside the RX task.
-     * This drains the jitter buffer to I2S independently of both
-     * the RX task (which fills the buffer) and the TIC task (TX). */
-    {
-        static TaskHandle_t pb_task = NULL;
-        xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
-                                18, &pb_task, 1);
-    }
-
     if (handle->config.sap_enabled && handle->sap) {
         ret = aes67_sap_start(handle->sap);
         if (ret != ESP_OK) {
@@ -364,6 +355,13 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
     }
 
     handle->running = true;
+
+    /* Start dedicated playback task AFTER running=true */
+    {
+        static TaskHandle_t pb_task = NULL;
+        xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
+                                18, &pb_task, 1);
+    }
 
     /* Start the hardware PTP frame timer and audio frame task.
      * This task handles both TX and RX at PTP-aligned boundaries. */

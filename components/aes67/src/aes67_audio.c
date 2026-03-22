@@ -488,11 +488,11 @@ esp_err_t aes67_audio_write_playback(aes67_audio_handle_t handle,
 
     uint32_t free_frames = ring_free(handle->playback_wr, handle->playback_rd, cap);
     if (frame_count > free_frames) {
-        /* Drop oldest frames to make room - prevents stale data looping.
-         * This is preferable to failing the write, which would cause the
-         * I2S to replay old content in a loop (sounds like digital noise). */
-        uint32_t to_drop = frame_count - free_frames;
-        handle->playback_rd += to_drop;
+        /* Not enough room. Just overwrite - the I2S read task will
+         * pick up the latest data. Don't touch playback_rd here as
+         * that would race with the I2S I/O task reading it. */
+        frame_count = free_frames;
+        if (frame_count == 0) return ESP_OK;
     }
 
     uint32_t wr = handle->playback_wr;
@@ -535,6 +535,23 @@ esp_err_t aes67_audio_read_capture(aes67_audio_handle_t handle,
     handle->capture_rd = rd;
 
     return ESP_OK;
+}
+
+esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
+                                   const int32_t *samples, uint32_t frame_count)
+{
+    if (!handle || !samples) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Write int32 samples directly to I2S TX channel, bypassing the
+     * playback ring buffer. Each int32 sample maps directly to a
+     * 32-bit I2S slot in Philips mode (left-justified). */
+    size_t bytes_written = 0;
+    size_t bytes_to_write = frame_count * handle->config.channels * sizeof(int32_t);
+
+    return i2s_channel_write(handle->tx_chan, samples, bytes_to_write,
+                              &bytes_written, pdMS_TO_TICKS(5));
 }
 
 esp_err_t aes67_audio_get_config(aes67_audio_handle_t handle,

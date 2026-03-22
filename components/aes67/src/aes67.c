@@ -117,23 +117,15 @@ static void audio_frame_task(void *arg)
                     esp_err_t read_err = aes67_rtp_sink_read(sink.rtp_stream,
                                                               playback_buf, spp);
                     if (read_err == ESP_OK) {
-                        aes67_audio_write_playback(node->audio, playback_buf, spp);
-
-                        /* Debug: log first few playback writes */
-                        static int pb_log_count = 0;
-                        if (pb_log_count < 3) {
-                            pb_log_count++;
-                            ESP_LOGI(TAG, "TIC->playback: read %lu frames from sink, "
-                                     "samples[0]=0x%08lx [1]=0x%08lx [2]=0x%08lx [3]=0x%08lx",
-                                     (unsigned long)spp,
-                                     (unsigned long)playback_buf[0],
-                                     (unsigned long)playback_buf[1],
-                                     (unsigned long)playback_buf[2],
-                                     (unsigned long)playback_buf[3]);
-                        }
-                    } else if (frame_count < 5) {
-                        ESP_LOGW(TAG, "TIC: sink_read returned %s",
-                                 esp_err_to_name(read_err));
+                        /* Write directly to I2S, bypassing the ring buffer.
+                         * The ring buffer adds latency and has a race
+                         * condition with the I/O task. Direct write from
+                         * the TIC task gives PTP-synchronized output. */
+                        extern esp_err_t aes67_audio_direct_write(
+                            aes67_audio_handle_t handle,
+                            const int32_t *samples, uint32_t frame_count);
+                        aes67_audio_direct_write(node->audio,
+                                                  playback_buf, spp);
                     }
                     break;
                 }

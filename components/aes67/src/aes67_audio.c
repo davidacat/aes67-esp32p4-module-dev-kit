@@ -520,18 +520,30 @@ esp_err_t aes67_audio_read_capture(aes67_audio_handle_t handle,
 esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
                                    const int32_t *samples, uint32_t frame_count)
 {
-    if (!handle || !samples) {
+    if (!handle || !samples || frame_count == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
     /* Write int32 samples directly to I2S TX channel, bypassing the
      * playback ring buffer. Each int32 sample maps directly to a
-     * 32-bit I2S slot in Philips mode (left-justified). */
+     * 32-bit I2S slot in Philips mode (left-justified).
+     * Use a longer timeout to ensure the DMA has time to accept data. */
     size_t bytes_written = 0;
     size_t bytes_to_write = frame_count * handle->config.channels * sizeof(int32_t);
 
-    return i2s_channel_write(handle->tx_chan, samples, bytes_to_write,
-                              &bytes_written, pdMS_TO_TICKS(5));
+    esp_err_t ret = i2s_channel_write(handle->tx_chan, samples, bytes_to_write,
+                                       &bytes_written, pdMS_TO_TICKS(20));
+
+    /* Log first successful write for debugging */
+    static bool first_write_logged = false;
+    if (!first_write_logged && bytes_written > 0) {
+        first_write_logged = true;
+        ESP_LOGI("aes67_audio", "First I2S direct write: %u/%u bytes, ret=%s",
+                 (unsigned)bytes_written, (unsigned)bytes_to_write,
+                 esp_err_to_name(ret));
+    }
+
+    return ret;
 }
 
 esp_err_t aes67_audio_get_config(aes67_audio_handle_t handle,

@@ -393,23 +393,29 @@ static void rx_task_func(void *arg)
         }
         stream->last_rx_time_us = now_us;
 
-        /* Convert from network byte order to native samples */
+        /* Convert from network byte order to native samples.
+         * Use actual payload size to determine frame count, not the
+         * SDP-declared samples_per_packet (which may differ). */
         const uint8_t *payload = rx_buf + AES67_RTP_HEADER_SIZE;
         uint32_t payload_len = recv_len - AES67_RTP_HEADER_SIZE;
-        uint32_t expected_payload = stream->packet_payload_size;
-
-        if (payload_len < expected_payload) {
-            continue;
-        }
-
-        uint32_t frames = stream->samples_per_packet;
         uint8_t channels = stream->config.channels;
         uint8_t wl = stream->config.word_length;
 
+        /* Compute actual frames from payload length */
+        uint32_t frame_size_bytes = channels * wl;
+        if (frame_size_bytes == 0 || payload_len < frame_size_bytes) {
+            continue;
+        }
+        uint32_t frames = payload_len / frame_size_bytes;
+
+        /* Limit to conversion buffer capacity */
+        uint32_t max_frames = CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 192 /
+                              channels;
+        if (frames > max_frames) frames = max_frames;
+
         aes67_convert_from_net(payload, sample_buf, frames, channels, wl);
 
-        /* Write converted int32_t samples into the jitter ring buffer.
-         * Each sample is stored as a full int32_t regardless of wire format. */
+        /* Write ALL converted int32_t samples into the jitter ring buffer */
         uint32_t data_bytes = frames * channels * sizeof(int32_t);
         uint32_t written = ringbuf_write(&stream->ring,
                                          (const uint8_t *)sample_buf,

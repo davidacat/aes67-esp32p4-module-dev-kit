@@ -207,7 +207,13 @@ static void playback_task(void *arg)
             memcpy(hold_buf, pcm_buf, 768);
             have_hold = true;
         } else if (have_hold) {
-            /* No new data -- repeat last good frame (sample hold) */
+            /* No new data -- fade the held frame toward silence.
+             * Each repeat reduces amplitude by 50%, so after 4 repeats
+             * (~16ms) the output is nearly silent. Much less audible
+             * than repeating the same waveform as a 250Hz buzz. */
+            for (int i = 0; i < 192 * 2; i++) {
+                hold_buf[i] = hold_buf[i] / 2;
+            }
             memcpy(pcm_buf, hold_buf, 768);
             frames = 192;
         } else {
@@ -236,7 +242,8 @@ static void playback_task(void *arg)
         if ((write_count % 1000) == 0) {
             int64_t el = esp_timer_get_time() - start_us;
             if (el > 0) {
-                ESP_LOGI(TAG, "PB: %lu fps, sb=%u/%u bytes",
+                extern uint32_t aes67_rtp_sink_available(void *s);
+                ESP_LOGI(TAG, "PB: %lu fps, sb=%u/%u",
                          (unsigned long)(total_frames * 1000000ULL / el),
                          (unsigned)xStreamBufferBytesAvailable(sbuf),
                          (unsigned)xStreamBufferSpacesAvailable(sbuf));

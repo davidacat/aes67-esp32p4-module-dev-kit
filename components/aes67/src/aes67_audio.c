@@ -21,9 +21,10 @@ static const char *TAG = "aes67_audio";
 #define AUDIO_IO_TASK_STACK     (4096)
 #define AUDIO_IO_TASK_PRIORITY  (22)
 
-/* I2S DMA descriptors: 4 at 48 frames each = 192 frames = 4ms buffer.
- * Minimal latency while still providing enough depth for scheduling jitter. */
-#define DMA_DESC_NUM            4
+/* I2S DMA: 8 descriptors at 64 frames = 512 frames = 10.7ms.
+ * Must be large enough to hold one full batch write (480 frames)
+ * to avoid blocking overhead. */
+#define DMA_DESC_NUM            8
 
 /* Timeout for I2S read/write operations (ms) */
 #define I2S_IO_TIMEOUT_MS       100
@@ -294,16 +295,14 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
                                     : I2S_SLOT_MODE_STEREO; /* TDM handled separately if needed */
 
     i2s_std_config_t std_cfg = {
-        .clk_cfg = {
-            .sample_rate_hz = audio_config->sample_rate,
-            .clk_src = I2S_CLK_SRC_APLL,
-            .mclk_multiple = I2S_MCLK_MULTIPLE_384,
-        },
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio_config->sample_rate),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bit_width, slot_mode),
     };
 
-    /* MCLK multiple already set to 384 in clk_cfg above.
-     * 384 is divisible by 3 (required for 24-bit) and works for all bit depths. */
+    /* For 24-bit audio the MCLK multiple must be divisible by 3 */
+    if (audio_config->word_length == 3) {
+        std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
+    }
 
     std_cfg.gpio_cfg = (i2s_std_gpio_config_t){
         .mclk = pins->mck_gpio,

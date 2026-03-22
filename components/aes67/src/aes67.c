@@ -107,45 +107,10 @@ static void audio_frame_task(void *arg)
          * convert to network format, send RTP packets */
         aes67_rtp_engine_process_tx(node->rtp, rtp_ts);
 
-        /* RX: Drain ALL available samples from sink jitter buffer to I2S.
-         * The RTP RX deposits packets in bursts (e.g. 192 frames every 4ms),
-         * while the TIC fires every 1ms. We drain whatever is available
-         * each TIC to keep the I2S DMA fed continuously. */
-        if (playback_buf) {
-            int sink_count = aes67_session_get_sink_count(node->session);
-            for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
-                aes67_sink_t sink;
-                if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
-                    sink.enabled && sink.rtp_stream) {
-
-                    extern esp_err_t aes67_audio_direct_write(
-                        aes67_audio_handle_t handle,
-                        const int32_t *samples, uint32_t frame_count);
-
-                    /* Read and write in chunks until jitter buffer is drained */
-                    esp_err_t read_err;
-                    do {
-                        read_err = aes67_rtp_sink_read(sink.rtp_stream,
-                                                        playback_buf, spp);
-                        if (read_err == ESP_OK) {
-                            aes67_audio_direct_write(node->audio,
-                                                      playback_buf, spp);
-                        }
-                    } while (read_err == ESP_OK);
-
-                    break;
-                }
-            }
-
-            /* Log playback status periodically */
-            if (frame_count == 500 || frame_count == 15000 || frame_count == 30000) {
-                int sc = aes67_session_get_sink_count(node->session);
-                uint32_t cap_frames = 0, play_frames = 0;
-                aes67_audio_get_buffer_levels(node->audio, &cap_frames, &play_frames);
-                ESP_LOGI(TAG, "TIC: sinks=%d, playback_buf=%p, play_ring=%lu, cap_ring=%lu",
-                         sc, playback_buf, (unsigned long)play_frames, (unsigned long)cap_frames);
-            }
-        }
+        /* RX playback is now handled directly in the RTP RX task via
+         * aes67_rtp_engine_set_playback(). No need to read from jitter
+         * buffer here - the RX task writes received audio straight to
+         * i2s_channel_write() for immediate playback. */
     }
 
     ESP_LOGI(TAG, "Audio frame task stopped");
@@ -307,6 +272,13 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
         aes67_ptp_stop(handle->ptp);
         return ret;
     }
+
+    /* Enable direct I2S playback from the RTP RX task.
+     * Received audio is written directly to I2S from the RX task
+     * context, giving the simplest and most reliable playback path. */
+    extern void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t handle,
+                                               void *audio_handle);
+    aes67_rtp_engine_set_playback(handle->rtp, handle->audio);
 
     if (handle->config.sap_enabled && handle->sap) {
         ret = aes67_sap_start(handle->sap);

@@ -71,6 +71,9 @@ struct aes67_rtp_engine {
     bool running;
     bool use_psram;
     aes67_net_config_t net_config;
+    /* Direct I2S playback from RX task */
+    bool i2s_playback_enabled;
+    void *audio_handle;
 };
 
 /* --- Ring buffer helpers --- */
@@ -424,6 +427,16 @@ static void rx_task_func(void *arg)
             stream->status.status_flags |= AES67_RTP_STATUS_OVERFLOW;
         }
 
+        /* Also write directly to I2S for immediate playback.
+         * The i2s_channel_write will block until DMA accepts the data,
+         * which paces the output at the correct sample rate. */
+        if (engine->i2s_playback_enabled && frames > 0) {
+            extern esp_err_t aes67_audio_direct_write(
+                void *handle, const int32_t *samples, uint32_t frame_count);
+            aes67_audio_direct_write(engine->audio_handle,
+                                      sample_buf, frames);
+        }
+
         stream->status.packets_received++;
 
         /* Debug: log first few received packets for format verification */
@@ -492,6 +505,17 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     ESP_LOGI(TAG, "Engine initialized, RX socket on port %u",
              net_config->rtp_port);
     return ESP_OK;
+}
+
+void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t handle,
+                                   void *audio_handle)
+{
+    if (handle) {
+        handle->audio_handle = audio_handle;
+        handle->i2s_playback_enabled = (audio_handle != NULL);
+        ESP_LOGI(TAG, "I2S playback from RX task %s",
+                 handle->i2s_playback_enabled ? "enabled" : "disabled");
+    }
 }
 
 esp_err_t aes67_rtp_engine_start(aes67_rtp_engine_handle_t handle)

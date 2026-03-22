@@ -194,7 +194,8 @@ static void handle_sap_rx(struct aes67_sap_ctx *ctx, const uint8_t *data,
         if (idx >= 0) {
             aes67_sap_remote_source_t removed = ctx->remote[idx];
             remove_remote(ctx, idx);
-            ESP_LOGI(TAG, "Remote source deleted: %s", removed.name);
+            ESP_LOGI(TAG, "Source gone: \"%s\" (%d sources remaining)",
+                     removed.name, ctx->remote_count);
             if (ctx->event_cb) {
                 ctx->event_cb(false, &removed, ctx->user_data);
             }
@@ -234,8 +235,16 @@ static void handle_sap_rx(struct aes67_sap_ctx *ctx, const uint8_t *data,
 
             ctx->remote_count++;
 
-            ESP_LOGI(TAG, "Remote source discovered: %s (id=0x%04X)",
-                     src->name, msg_id);
+            /* Parse SDP for additional info to display */
+            char ip_str[16] = {0};
+            struct in_addr addr_tmp = { .s_addr = origin_ip };
+            const char *ip = inet_ntoa(addr_tmp);
+            if (ip) {
+                strncpy(ip_str, ip, sizeof(ip_str) - 1);
+            }
+
+            ESP_LOGI(TAG, "Discovered: \"%s\" from %s (%d sources on network)",
+                     src->name, ip_str, ctx->remote_count);
             if (ctx->event_cb) {
                 ctx->event_cb(true, src, ctx->user_data);
             }
@@ -254,7 +263,8 @@ static void expire_remote_sources(struct aes67_sap_ctx *ctx)
         if (elapsed >= timeout_ticks) {
             aes67_sap_remote_source_t expired = ctx->remote[i];
             remove_remote(ctx, i);
-            ESP_LOGI(TAG, "Remote source timed out: %s", expired.name);
+            ESP_LOGI(TAG, "Source timeout: \"%s\" (no announcement for %ds)",
+                     expired.name, SAP_TIMEOUT_MS / 1000);
             if (ctx->event_cb) {
                 ctx->event_cb(false, &expired, ctx->user_data);
             }

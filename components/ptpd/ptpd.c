@@ -995,7 +995,7 @@ static int ptp_send_announce(FAR struct ptp_state_s *state)
     }
   else
     {
-      ptpinfo("Sent announce, seq %ld\n",
+      ESP_LOGD(TAG, "Sent announce, seq %ld",
               (long)ptp_get_sequence(&msg.header));
     }
 
@@ -1112,10 +1112,10 @@ static int ptp_send_sync(FAR struct ptp_state_s *state)
       return ret;
     }
 
-  ptpinfo("Sent sync + follow-up, seq %ld\n",
+  ESP_LOGD(TAG, "Sent sync + follow-up, seq %ld",
           (long)ptp_get_sequence(&msg.header));
 #else
-  ptpinfo("Sent sync, seq %ld\n",
+  ESP_LOGD(TAG, "Sent sync, seq %ld",
           (long)ptp_get_sequence(&msg.header));
 #endif /* CONFIG_NETUTILS_PTPD_TWOSTEP_SYNC */
 
@@ -1177,7 +1177,7 @@ static int ptp_send_delay_req(FAR struct ptp_state_s *state)
   else
     {
       clock_gettime(CLOCK_MONOTONIC, &state->last_transmitted_delayreq);
-      ptpinfo("Sent delay req, seq %ld\n",
+      ESP_LOGD(TAG, "Sent delay req, seq %ld",
               (long)ptp_get_sequence(&req.header));
     }
 
@@ -1641,7 +1641,7 @@ static int ptp_process_delay_req(FAR struct ptp_state_s *state,
   else
     {
       clock_gettime(CLOCK_MONOTONIC, &state->last_transmitted_delayresp);
-      ptpinfo("Sent delay resp, seq %ld\n",
+      ESP_LOGD(TAG, "Sent delay resp, seq %ld",
               (long)ptp_get_sequence(&msg->header));
     }
 

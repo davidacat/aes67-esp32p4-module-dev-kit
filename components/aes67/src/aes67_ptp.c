@@ -61,6 +61,9 @@ struct aes67_ptp_ctx {
     /* Cached status values */
     int32_t offset_ns;
     int32_t path_delay_ns;
+
+    /* Stats logging counter (prints every N polls) */
+    int stats_counter;
 };
 
 /* -------------------------------------------------------------------
@@ -81,7 +84,7 @@ static bool ptp_update_lock_state(struct aes67_ptp_ctx *ctx, int64_t offset_ns)
         if (abs_offset < PTP_LOCKING_THRESHOLD_NS) {
             ctx->lock_state = AES67_PTP_LOCKING;
             ctx->stable_count = 0;
-            ESP_LOGI(TAG, "PTP state: UNLOCKED -> LOCKING (offset %lld ns)", (long long)offset_ns);
+            ESP_LOGI(TAG, "PTP locking (offset %lld ns)", (long long)offset_ns);
         }
         break;
 
@@ -90,12 +93,12 @@ static bool ptp_update_lock_state(struct aes67_ptp_ctx *ctx, int64_t offset_ns)
             /* Lost convergence, fall back */
             ctx->lock_state = AES67_PTP_UNLOCKED;
             ctx->stable_count = 0;
-            ESP_LOGW(TAG, "PTP state: LOCKING -> UNLOCKED (offset %lld ns)", (long long)offset_ns);
+            ESP_LOGW(TAG, "PTP lost lock (offset %lld ns)", (long long)offset_ns);
         } else if (abs_offset < PTP_LOCKED_THRESHOLD_NS) {
             ctx->stable_count++;
             if (ctx->stable_count >= PTP_LOCKED_STABLE_COUNT) {
                 ctx->lock_state = AES67_PTP_LOCKED;
-                ESP_LOGI(TAG, "PTP state: LOCKING -> LOCKED (offset %lld ns, %d stable polls)",
+                ESP_LOGI(TAG, "PTP locked (offset %lld ns after %d stable polls)",
                          (long long)offset_ns, ctx->stable_count);
             }
         } else {
@@ -108,11 +111,11 @@ static bool ptp_update_lock_state(struct aes67_ptp_ctx *ctx, int64_t offset_ns)
         if (abs_offset >= PTP_LOCKING_THRESHOLD_NS) {
             ctx->lock_state = AES67_PTP_UNLOCKED;
             ctx->stable_count = 0;
-            ESP_LOGW(TAG, "PTP state: LOCKED -> UNLOCKED (offset %lld ns)", (long long)offset_ns);
+            ESP_LOGW(TAG, "PTP lost lock completely (offset %lld ns)", (long long)offset_ns);
         } else if (abs_offset >= PTP_LOCKED_THRESHOLD_NS) {
             ctx->lock_state = AES67_PTP_LOCKING;
             ctx->stable_count = 0;
-            ESP_LOGW(TAG, "PTP state: LOCKED -> LOCKING (offset %lld ns)", (long long)offset_ns);
+            ESP_LOGW(TAG, "PTP drifting (offset %lld ns, re-locking)", (long long)offset_ns);
         }
         break;
     }
@@ -207,6 +210,34 @@ static void ptp_monitor_task(void *arg)
             bool changed = ptp_update_lock_state(ctx, status.last_delta_ns);
             if (changed && ctx->lock_cb) {
                 ctx->lock_cb(ctx->lock_state, ctx->lock_cb_user_data);
+            }
+        }
+
+        /* Periodic stats log every 20 polls (~10 seconds) */
+        ctx->stats_counter++;
+        if (ctx->stats_counter >= 20) {
+            ctx->stats_counter = 0;
+
+            const char *role = ctx->is_grandmaster ? "master" : "slave";
+            const char *lock = (ctx->lock_state == AES67_PTP_LOCKED) ? "locked" :
+                               (ctx->lock_state == AES67_PTP_LOCKING) ? "locking" :
+                               "unlocked";
+
+            if (ctx->is_grandmaster) {
+                ESP_LOGI(TAG, "[%s/%s] GM ID: %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X",
+                         role, lock,
+                         ctx->own_mac[0], ctx->own_mac[1], ctx->own_mac[2],
+                         0xFF, 0xFE,
+                         ctx->own_mac[3], ctx->own_mac[4], ctx->own_mac[5]);
+            } else {
+                ESP_LOGI(TAG, "[%s/%s] offset: %+ld ns, path delay: %ld ns, "
+                         "GM: %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X",
+                         role, lock,
+                         (long)ctx->offset_ns, (long)ctx->path_delay_ns,
+                         ctx->grandmaster_id[0], ctx->grandmaster_id[1],
+                         ctx->grandmaster_id[2], ctx->grandmaster_id[3],
+                         ctx->grandmaster_id[4], ctx->grandmaster_id[5],
+                         ctx->grandmaster_id[6], ctx->grandmaster_id[7]);
             }
         }
     }

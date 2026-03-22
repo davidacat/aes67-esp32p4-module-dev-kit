@@ -76,17 +76,15 @@ static int build_sap_packet(uint8_t *buf, size_t buf_len,
         return -1;
     }
 
-    /* SAP header */
+    /* SAP header per RFC 2974 */
     buf[0] = flags;
     buf[1] = 0;  /* auth_len = 0 */
     buf[2] = (uint8_t)(msg_id >> 8);
     buf[3] = (uint8_t)(msg_id & 0xFF);
 
-    /* Originating source IP in network byte order */
-    buf[4] = (uint8_t)(origin_ip >> 24);
-    buf[5] = (uint8_t)(origin_ip >> 16);
-    buf[6] = (uint8_t)(origin_ip >> 8);
-    buf[7] = (uint8_t)(origin_ip);
+    /* Originating source IP. The origin_ip value from lwIP is already
+     * in network byte order, so copy the 4 bytes directly. */
+    memcpy(buf + 4, &origin_ip, 4);
 
     /* Content type string with null terminator */
     memcpy(buf + SAP_HEADER_SIZE, SAP_CONTENT_TYPE, SAP_CONTENT_TYPE_LEN);
@@ -109,9 +107,12 @@ static esp_err_t send_sap_packet(int sock, const uint8_t *pkt, int pkt_len)
     int sent = sendto(sock, pkt, pkt_len, 0,
                       (struct sockaddr *)&dest, sizeof(dest));
     if (sent < 0) {
-        ESP_LOGE(TAG, "SAP sendto failed: errno %d", errno);
+        ESP_LOGE(TAG, "SAP sendto 224.2.127.254:%d failed: errno %d",
+                 AES67_SAP_PORT, errno);
         return ESP_FAIL;
     }
+    ESP_LOGD(TAG, "SAP packet sent (%d bytes to 224.2.127.254:%d)",
+             sent, AES67_SAP_PORT);
     return ESP_OK;
 }
 
@@ -173,8 +174,8 @@ static void handle_sap_rx(struct aes67_sap_ctx *ctx, const uint8_t *data,
 
     uint8_t flags = data[0];
     uint16_t msg_id = ((uint16_t)data[2] << 8) | data[3];
-    uint32_t origin_ip = ((uint32_t)data[4] << 24) | ((uint32_t)data[5] << 16) |
-                         ((uint32_t)data[6] << 8) | data[7];
+    uint32_t origin_ip;
+    memcpy(&origin_ip, data + 4, 4); /* Already in network byte order */
 
     /* Verify content type */
     if (memcmp(data + SAP_HEADER_SIZE, SAP_CONTENT_TYPE,
@@ -398,8 +399,16 @@ esp_err_t aes67_sap_start(aes67_sap_handle_t handle)
         return err;
     }
 
-    /* Set a reasonable TTL for SAP packets */
+    /* Set multicast TTL and outgoing interface */
     aes67_net_set_multicast_ttl(handle->sock, 32);
+
+    /* Set the outgoing multicast interface to our local IP so packets
+     * go out via Ethernet, not a random interface */
+    uint32_t local_ip = 0;
+    aes67_net_get_local_ip(&local_ip);
+    struct in_addr mcast_if = { .s_addr = local_ip };
+    setsockopt(handle->sock, IPPROTO_IP, IP_MULTICAST_IF,
+               &mcast_if, sizeof(mcast_if));
 
     handle->running = true;
 

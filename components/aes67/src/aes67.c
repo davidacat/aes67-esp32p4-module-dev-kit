@@ -203,29 +203,32 @@ static void playback_task(void *arg)
             ESP_LOGI(TAG, "Playback: DMA ring prefilled");
         }
 
-        /* Wait for next packet from RTP RX (notification-driven) */
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        /* Wait for RTP RX to notify new packet arrived.
+         * pdFALSE = decrement by 1 (not clear all), so we don't
+         * lose notifications when multiple packets arrive at once. */
+        ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(10));
 
-        /* Read exactly one packet (192 frames). The i2s_channel_write
-         * will block because the DMA ring is already full from prefill.
-         * Blocking releases when DMA plays one descriptor (4ms at 48kHz).
-         * This is the pacing mechanism -- DMA hardware = 48kHz clock. */
+        /* Read one packet (192 frames) from jitter buffer */
         if (aes67_rtp_sink_read(cached_sink, buf, spp) != ESP_OK)
             continue;
         uint32_t frames = spp;
 
-        /* Mono mix in-place */
-        if (ch == 2) {
-            for (uint32_t f = 0; f < frames; f++) {
-                int32_t mono = (buf[f * 2] >> 1) + (buf[f * 2 + 1] >> 1);
-                buf[f * 2] = mono;
-                buf[f * 2 + 1] = mono;
-            }
-        }
+        /* Mono mix + int32->int16 conversion in single pass,
+         * write directly to the staging ring buffer (NOT i2s_channel_write).
+         * The DMA ISR copies from staging to DMA buffer. */
+        extern esp_err_t aes67_audio_staging_write(
+            aes67_audio_handle_t h, const int16_t *samples, uint32_t count);
 
-        /* Write to I2S -- blocks until DMA descriptor consumed (~20ms).
-         * This blocking IS the playback pacing. */
-        aes67_audio_direct_write(node->audio, buf, frames);
+        int16_t conv_buf[spp * ch];
+        for (uint32_t f = 0; f < frames; f++) {
+            int32_t left  = buf[f * 2];
+            int32_t right = buf[f * 2 + 1];
+            int32_t mono  = (left >> 1) + (right >> 1);
+            int16_t s16   = (int16_t)(mono >> 16);
+            conv_buf[f * 2]     = s16;
+            conv_buf[f * 2 + 1] = s16;
+        }
+        aes67_audio_staging_write(node->audio, conv_buf, frames * ch);
 
         total_frames += frames;
         write_count++;

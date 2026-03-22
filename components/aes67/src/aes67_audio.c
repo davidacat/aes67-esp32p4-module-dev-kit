@@ -55,6 +55,14 @@ struct aes67_audio_ctx {
     /* DMA completion semaphore - signaled by on_sent ISR callback */
     SemaphoreHandle_t dma_sem;
 
+    /* Staging ring buffer: playback task writes int16 data here,
+     * DMA ISR reads from here to fill DMA descriptors directly.
+     * This bypasses i2s_channel_write entirely. */
+    int16_t *staging_buf;
+    uint32_t staging_size;      /* Total size in int16 samples */
+    volatile uint32_t staging_wr;
+    volatile uint32_t staging_rd;
+
     /* Frame callback */
     aes67_audio_frame_cb_t frame_cb;
     void *frame_cb_user_data;
@@ -161,12 +169,44 @@ static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
 /* --- DMA callback --------------------------------------------------------- */
 
 /* ISR callback: fires when a DMA descriptor finishes playing.
- * Gives the semaphore to wake the playback task immediately. */
+ * Copies data from the staging ring buffer directly into the DMA
+ * buffer (event->dma_buf). This completely bypasses i2s_channel_write
+ * and its per-call overhead (semaphore, queue, cache sync).
+ *
+ * Then notifies the playback task to refill the staging buffer. */
 static IRAM_ATTR bool on_i2s_tx_sent(i2s_chan_handle_t handle,
                                       i2s_event_data_t *event,
                                       void *user_ctx)
 {
     struct aes67_audio_ctx *ctx = (struct aes67_audio_ctx *)user_ctx;
+    int16_t *dma_buf = (int16_t *)event->dma_buf;
+    uint32_t dma_samples = event->size / sizeof(int16_t);
+
+    /* Copy from staging ring to DMA buffer */
+    uint32_t rd = ctx->staging_rd;
+    uint32_t wr = ctx->staging_wr;
+    uint32_t cap = ctx->staging_size;
+    uint32_t avail = (wr >= rd) ? (wr - rd) : (cap - rd + wr);
+
+    uint32_t to_copy = (avail < dma_samples) ? avail : dma_samples;
+    uint32_t first = cap - (rd % cap);
+    if (first > to_copy) first = to_copy;
+
+    /* Fast copy from staging ring (internal SRAM, no cache issues) */
+    memcpy(dma_buf, &ctx->staging_buf[rd % cap], first * sizeof(int16_t));
+    if (to_copy > first) {
+        memcpy(dma_buf + first, ctx->staging_buf,
+               (to_copy - first) * sizeof(int16_t));
+    }
+
+    /* Zero-fill if not enough data (silence on underrun) */
+    if (to_copy < dma_samples) {
+        memset(dma_buf + to_copy, 0, (dma_samples - to_copy) * sizeof(int16_t));
+    }
+
+    ctx->staging_rd = (rd + to_copy) % cap;
+
+    /* Notify playback task to refill staging buffer */
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(ctx->dma_sem, &woken);
     return woken == pdTRUE;
@@ -244,7 +284,8 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
     chan_cfg.dma_frame_num = DMA_FRAME_NUM;
-    chan_cfg.auto_clear = true;    /* Clear DMA buffer on underflow (silence) */
+    chan_cfg.auto_clear = false;   /* We fill DMA buffers via ISR callback */
+    chan_cfg.auto_clear_after_cb = false;  /* Don't clear after our callback */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {
@@ -297,7 +338,19 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     ctx->playback_wr = 0;
     ctx->playback_rd = 0;
 
-    /* Binary semaphore: DMA ISR signals when ANY descriptor completes */
+    /* Staging ring: playback task writes int16, DMA ISR reads.
+     * 40ms at 48kHz stereo = 1920 frames * 2ch = 3840 samples */
+    ctx->staging_size = 1920 * audio_config->channels;
+    ctx->staging_buf = heap_caps_calloc(ctx->staging_size, sizeof(int16_t),
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!ctx->staging_buf) {
+        ESP_LOGE(TAG, "Failed to allocate staging ring");
+        goto err_del_channel;
+    }
+    ctx->staging_wr = 0;
+    ctx->staging_rd = 0;
+
+    /* Binary semaphore: DMA ISR signals when descriptor consumed */
     ctx->dma_sem = xSemaphoreCreateBinary();
     if (!ctx->dma_sem) {
         ESP_LOGE(TAG, "Failed to create DMA semaphore");
@@ -594,6 +647,38 @@ esp_err_t aes67_audio_get_buffer_levels(aes67_audio_handle_t handle,
                                           handle->buf_size_frames);
     }
 
+    return ESP_OK;
+}
+
+/* Write int16 stereo samples to the staging ring buffer.
+ * Called by the playback task. The DMA ISR reads from this ring. */
+esp_err_t aes67_audio_staging_write(aes67_audio_handle_t handle,
+                                     const int16_t *samples, uint32_t sample_count)
+{
+    if (!handle || !samples) return ESP_ERR_INVALID_ARG;
+
+    uint32_t cap = handle->staging_size;
+    uint32_t wr = handle->staging_wr;
+    uint32_t rd = handle->staging_rd;
+    uint32_t avail = (wr >= rd) ? (wr - rd) : (cap - rd + wr);
+    uint32_t free_samples = cap - 1 - avail;  /* -1 for sentinel */
+
+    if (sample_count > free_samples) {
+        sample_count = free_samples;
+    }
+    if (sample_count == 0) return ESP_OK;
+
+    uint32_t pos = wr % cap;
+    uint32_t first = cap - pos;
+    if (first > sample_count) first = sample_count;
+
+    memcpy(&handle->staging_buf[pos], samples, first * sizeof(int16_t));
+    if (sample_count > first) {
+        memcpy(handle->staging_buf, samples + first,
+               (sample_count - first) * sizeof(int16_t));
+    }
+
+    handle->staging_wr = (wr + sample_count) % cap;
     return ESP_OK;
 }
 

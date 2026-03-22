@@ -192,39 +192,45 @@ static void playback_task(void *arg)
             continue;
         }
 
-        /* Non-blocking read with sample-repeat. With APLL the rate matches
-         * perfectly so holds are rare (~2% from lwIP overhead only). */
+        /* DMA-paced playback with auto_clear=false:
+         * 1. Write previous data to I2S (BLOCKS ~4ms until DMA frees descriptor)
+         * 2. During the 4ms block, raw callback fills stream buffer
+         * 3. Read new data from stream buffer (should be ready instantly)
+         * 4. Loop to step 1 with the new data
+         *
+         * The i2s_channel_write blocking IS the 48kHz pacing mechanism.
+         * With auto_clear=false, if we don't write, DMA replays old audio. */
         int16_t pcm_buf[192 * 2];
-        static int16_t last_buf[192 * 2];
-        static bool have_data = false;
-        uint32_t frames;
+        static int16_t prev_buf[192 * 2];
+        static bool have_prev = false;
+        uint32_t frames = 192;
 
+        extern i2s_chan_handle_t aes67_audio_get_tx_chan(void *h);
+        i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
+
+        if (have_prev && tx) {
+            /* Step 1: Write PREVIOUS packet to I2S. This BLOCKS for ~4ms
+             * until DMA finishes playing a descriptor and frees it. */
+            size_t written = 0;
+            i2s_channel_write(tx, prev_buf, frames * ch * sizeof(int16_t),
+                              &written, portMAX_DELAY);
+        }
+
+        /* Step 2: Read new data from stream buffer (non-blocking).
+         * Raw callback should have written during the ~4ms block above. */
         size_t avail = xStreamBufferBytesAvailable(sbuf);
         if (avail >= 768) {
             xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
-            memcpy(last_buf, pcm_buf, 768);
-            have_data = true;
-            frames = 192;
-        } else if (have_data) {
-            /* Repeat last frame -- with APLL clock this is rare and
-             * a clean repeat is less audible than silence or fade */
-            memcpy(pcm_buf, last_buf, 768);
-            frames = 192;
-        } else {
+            memcpy(prev_buf, pcm_buf, 768);
+            have_prev = true;
+        } else if (!have_prev) {
+            /* No data yet, wait for first packet */
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
-
-        /* Write int16 directly to I2S */
-        {
-            size_t written = 0;
-            extern i2s_chan_handle_t aes67_audio_get_tx_chan(void *h);
-            i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
-            if (tx) {
-                i2s_channel_write(tx, pcm_buf, frames * ch * sizeof(int16_t),
-                                  &written, portMAX_DELAY);
-            }
-        }
+        /* If no new data but have_prev: prev_buf stays unchanged,
+         * next write will replay it. DMA also replays old descriptors
+         * with auto_clear=false, so the output is smooth. */
 
         total_frames += frames;
         write_count++;

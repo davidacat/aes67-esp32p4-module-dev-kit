@@ -50,7 +50,12 @@ static void sap_discovery_cb(bool is_announce,
         return;
     }
 
-    /* Subscribe to the first discovered source as a sink */
+    /* Only subscribe to the RPi daemon source */
+    if (strstr(source->name, "Daemon") == NULL &&
+        strstr(source->name, "ALSA") == NULL) {
+        return;
+    }
+
     ESP_LOGI("main", "Auto-subscribing to \"%s\" from SAP", source->name);
 
     uint8_t sink_id = 0;
@@ -284,7 +289,7 @@ static esp_err_t es8311_codec_init(void)
     }
 
     /* Set output volume (0-100) */
-    ret = es8311_voice_volume_set(codec, 20, NULL);
+    ret = es8311_voice_volume_set(codec, 25, NULL);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "ES8311 volume set failed: %s", esp_err_to_name(ret));
     }

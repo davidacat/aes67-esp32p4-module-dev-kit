@@ -29,6 +29,7 @@
 
 #include <string.h>
 #include "aes67.h"
+#include "aes67_convert.h"
 #include "aes67_session.h"
 #include "aes67_rtp.h"
 #include "aes67_sap.h"
@@ -137,6 +138,97 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
+/* --- Ethernet RTP hook: intercept RTP frames before lwIP --- */
+
+static esp_err_t (*s_original_input)(esp_eth_handle_t, uint8_t*, uint32_t, void*, void*) = NULL;
+static void *s_original_priv = NULL;
+static i2s_chan_handle_t s_hook_tx_chan = NULL;
+static int32_t *s_hook_tmp32 = NULL;
+static int16_t *s_hook_i16 = NULL;
+static uint32_t s_hook_pkt_count = 0;
+
+/* Called for EVERY Ethernet frame, before lwIP.
+ * RTP multicast on port 5004: process + free. Everything else: forward to lwIP. */
+static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
+                                          uint8_t *buffer, uint32_t length,
+                                          void *priv, void *info)
+{
+    /* Quick reject: minimum Ethernet+IP+UDP+RTP header = 54 bytes */
+    if (length < 54 || !s_hook_tx_chan) goto forward;
+
+    /* EtherType must be IPv4 */
+    if (buffer[12] != 0x08 || buffer[13] != 0x00) goto forward;
+
+    /* IP protocol must be UDP (17) */
+    uint8_t ihl = (buffer[14] & 0x0F) * 4;
+    if (buffer[14 + 9] != 17) goto forward;
+
+    /* Must be IPv4 multicast destination (224.0.0.0/4) */
+    if ((buffer[14 + 16] & 0xF0) != 0xE0) goto forward;
+
+    /* UDP destination port must be 5004 */
+    int udp_off = 14 + ihl;
+    uint16_t dst_port = (buffer[udp_off + 2] << 8) | buffer[udp_off + 3];
+    if (dst_port != 5004) goto forward;
+
+    /* RTP version must be 2 */
+    int rtp_off = udp_off + 8;
+    if ((buffer[rtp_off] >> 6) != 2) goto forward;
+
+    /* Extract RTP payload */
+    uint8_t cc = buffer[rtp_off] & 0x0F;
+    int payload_off = rtp_off + 12 + cc * 4;
+
+    /* Handle RTP header extension */
+    if (buffer[rtp_off] & 0x10) {
+        if ((int)length < payload_off + 4) goto forward;
+        uint16_t ext_len = (buffer[payload_off + 2] << 8) | buffer[payload_off + 3];
+        payload_off += 4 + ext_len * 4;
+    }
+
+    if (payload_off >= (int)length) goto forward;
+
+    const uint8_t *payload = buffer + payload_off;
+    int payload_len = length - payload_off;
+
+    /* L24 stereo: 6 bytes per frame */
+    int frames = payload_len / 6;
+    if (frames <= 0 || frames > 192) goto forward;
+
+    /* Convert L24 -> int32 -> mono mix -> int16 stereo */
+    aes67_convert_from_net(payload, s_hook_tmp32, frames, 2, 3);
+    for (int i = 0; i < frames; i++) {
+        int32_t mono = (s_hook_tmp32[i*2] >> 1) + (s_hook_tmp32[i*2+1] >> 1);
+        int16_t s16 = (int16_t)(mono >> 16);
+        s_hook_i16[i*2] = s16;
+        s_hook_i16[i*2+1] = s16;
+    }
+
+    /* Write directly to I2S. portMAX_DELAY = DMA pacing at 48kHz.
+     * This blocks the Ethernet task for ~4ms per packet. Other packets
+     * queue in Ethernet DMA (32 RX buffers = 16ms headroom). */
+    size_t written = 0;
+    i2s_channel_write(s_hook_tx_chan, s_hook_i16,
+                       frames * 2 * sizeof(int16_t),
+                       &written, portMAX_DELAY);
+
+    s_hook_pkt_count++;
+    if ((s_hook_pkt_count % 10000) == 0) {
+        ESP_LOGI("eth_hook", "RTP: %lu pkts", (unsigned long)s_hook_pkt_count);
+    }
+
+    free(buffer);  /* We consumed the frame */
+    return ESP_OK;
+
+forward:
+    /* Not RTP -- forward to lwIP via esp_netif_receive */
+    if (s_original_priv) {
+        return esp_netif_receive((esp_netif_t *)s_original_priv, buffer, length, NULL);
+    }
+    free(buffer);
+    return ESP_OK;
+}
+
 /*
  * Initialize the IP101 Ethernet PHY over RMII.
  * The ESP32-P4-NANO uses an external 50MHz crystal for the RMII reference
@@ -206,6 +298,23 @@ static esp_err_t ethernet_init(esp_eth_handle_t *out_eth_handle)
                                                &eth_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
                                                &ip_event_handler, NULL));
+
+    /* Install Ethernet RTP hook: intercept RTP multicast before lwIP.
+     * Save the original handler (eth_input_to_netif) set by netif glue,
+     * then replace with our hook that chains to original for non-RTP. */
+    s_original_priv = eth_netif;  /* Original priv is the esp_netif_t */
+    /* The glue sets eth_input_to_netif as the callback. We need to get
+     * a reference to it. Since esp_netif_receive is the lwIP entry point,
+     * we store the netif and call esp_netif_receive directly in the forward path. */
+
+    /* Allocate conversion buffers for the hook (internal SRAM) */
+    s_hook_tmp32 = heap_caps_malloc(192 * 2 * sizeof(int32_t), MALLOC_CAP_INTERNAL);
+    s_hook_i16 = heap_caps_malloc(192 * 2 * sizeof(int16_t),
+                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+
+    /* Replace the input callback with our hook */
+    esp_eth_update_input_path_info(eth_handle, eth_rtp_hook, eth_netif);
+    ESP_LOGI(TAG, "Ethernet RTP hook installed (intercepts port 5004 before lwIP)");
 
     /* Start Ethernet */
     ret = esp_eth_start(eth_handle);
@@ -369,6 +478,16 @@ void app_main(void)
     /* Start PTP sync, RTP engine, SAP announcements and audio I/O.
      * This enables I2S which starts MCLK generation. */
     ESP_ERROR_CHECK(aes67_node_start(node));
+
+    /* Enable the Ethernet RTP hook now that I2S TX channel is available */
+    {
+        extern i2s_chan_handle_t aes67_audio_get_tx_chan(void *h);
+        extern esp_err_t aes67_node_get_audio(aes67_node_handle_t h, aes67_audio_handle_t *a);
+        aes67_audio_handle_t audio = NULL;
+        aes67_node_get_audio(node, &audio);
+        s_hook_tx_chan = aes67_audio_get_tx_chan(audio);
+        ESP_LOGI(TAG, "Ethernet hook I2S TX channel set");
+    }
 
     /* Initialize ES8311 codec AFTER I2S is running (MCLK must be active).
      * This is the critical init order discovered through testing. */

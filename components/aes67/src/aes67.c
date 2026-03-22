@@ -222,26 +222,37 @@ static void playback_task(void *arg)
          * and causes progressive drift (miss rate increases over time). */
         static uint32_t real_count = 0, miss_count = 0;
         static int32_t sdm0_adj = 0;
-        size_t avail = xStreamBufferBytesAvailable(sbuf);
-        if (avail >= 768) {
-            xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
-            memcpy(prev_buf, pcm_buf, 768);
-            have_prev = true;
-            real_count++;
-            /* Drain any extra buffered packets to prevent latency buildup */
-            while (xStreamBufferBytesAvailable(sbuf) >= 768) {
+
+        /* Try to read. If empty, spin briefly for the packet to arrive.
+         * The DMA keeps playing during our spin -- no pacing impact.
+         * Each spin iteration ~10us. 3 attempts * 50us = 150us max spin. */
+        bool got_data = false;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            if (xStreamBufferBytesAvailable(sbuf) >= 768) {
                 xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
                 memcpy(prev_buf, pcm_buf, 768);
+                have_prev = true;
                 real_count++;
+                got_data = true;
+                /* Drain extra packets to prevent latency buildup */
+                while (xStreamBufferBytesAvailable(sbuf) >= 768) {
+                    xStreamBufferReceive(sbuf, pcm_buf, 768, 0);
+                    memcpy(prev_buf, pcm_buf, 768);
+                    real_count++;
+                }
+                break;
             }
-        } else if (!have_prev) {
-            /* Wait for first packet */
-            vTaskDelay(pdMS_TO_TICKS(2));
-            continue;
-        } else {
+            if (!have_prev) break;
+            /* Brief spin: ~50us. DMA continues playing. */
+            for (volatile int j = 0; j < 5000; j++) { }
+        }
+
+        if (!got_data) {
+            if (!have_prev) {
+                vTaskDelay(pdMS_TO_TICKS(2));
+                continue;
+            }
             miss_count++;
-            /* Don't add any delay -- proceed immediately to write
-             * prev_buf, maintaining exact DMA pacing. */
         }
 
         total_frames += frames;
@@ -501,22 +512,12 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
      * L2 TAP captures ALL IPv4 frames, breaking PTP/SAP/mDNS.
      * Instead, raw PCB handles RTP in lwIP context (core 1),
      * playback task runs on core 0 at max priority (no preemption). */
-    extern void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t h,
-                                               void *audio);
-    aes67_rtp_engine_set_playback(handle->rtp, handle->audio);
+    /* Raw UDP PCB playback disabled: Ethernet hook handles RTP directly.
+     * The raw PCB still captures packets but doesn't write to I2S. */
 
-    {
-        static TaskHandle_t pb_task = NULL;
-        /* Core 0, priority 24 (higher than TIC at 21, higher than everything).
-         * This ensures the playback task runs IMMEDIATELY when
-         * i2s_channel_write returns, with no preemption delay. */
-        xTaskCreatePinnedToCore(playback_task, "aes67_pb", 4096, handle,
-                                24, &pb_task, 0);
-        extern void aes67_rtp_engine_set_notify_task(
-            aes67_rtp_engine_handle_t h, TaskHandle_t task);
-        aes67_rtp_engine_set_notify_task(handle->rtp, pb_task);
-    }
-    ESP_LOGI(TAG, "Playback on core 0 prio 24 (isolated from lwIP)");
+    /* Playback task DISABLED: Ethernet MAC hook writes directly to I2S.
+     * No stream buffer, no playback task, no contention. */
+    ESP_LOGI(TAG, "Playback via Ethernet MAC hook (no playback task)");
 
     /* Start the hardware PTP frame timer and audio frame task.
      * This task handles both TX and RX at PTP-aligned boundaries. */

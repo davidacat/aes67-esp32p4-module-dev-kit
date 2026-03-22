@@ -1324,19 +1324,27 @@ static int ptp_process_announce(FAR struct ptp_state_s *state,
 {
   clock_gettime(CLOCK_MONOTONIC, &state->last_received_announce);
 
-  /* Log every announce we receive so we can see all GMs on the network */
+  /* Log announce only when it's from a new/different GM than our current source,
+   * or if it's better than us and we haven't selected it yet. */
   bool better = is_better_clock(msg, &state->own_identity);
-  ESP_LOGI(TAG, "Announce from GM %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X "
-           "(p1=%u, class=%u, acc=%u, p2=%u) %s",
-           msg->gm_identity[0], msg->gm_identity[1],
-           msg->gm_identity[2], msg->gm_identity[3],
-           msg->gm_identity[4], msg->gm_identity[5],
-           msg->gm_identity[6], msg->gm_identity[7],
-           msg->gm_priority1,
-           msg->gm_quality[0],   /* clock class */
-           msg->gm_quality[1],   /* clock accuracy */
-           msg->gm_priority2,
-           better ? "<- BETTER than us" : "(not better)");
+  bool is_new_gm = !state->selected_source_valid ||
+                   memcmp(msg->gm_identity,
+                          state->selected_source.gm_identity,
+                          sizeof(msg->gm_identity)) != 0;
+
+  if (is_new_gm || !state->selected_source_valid) {
+    ESP_LOGI(TAG, "Announce from GM %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X "
+             "(p1=%u, class=%u, acc=%u, p2=%u) %s",
+             msg->gm_identity[0], msg->gm_identity[1],
+             msg->gm_identity[2], msg->gm_identity[3],
+             msg->gm_identity[4], msg->gm_identity[5],
+             msg->gm_identity[6], msg->gm_identity[7],
+             msg->gm_priority1,
+             msg->gm_quality[0],   /* clock class */
+             msg->gm_quality[1],   /* clock accuracy */
+             msg->gm_priority2,
+             better ? "<- BETTER than us" : "(not better)");
+  }
 
   if (better)
     {
@@ -1402,8 +1410,8 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   state->remote_time_ns_prev = remote_time_ns;
   state->local_time_ns_prev = local_time_ns;
 
-  ptpinfo("remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli\n", remote_delta_ns, local_delta_ns, tick_diff);
-  ptpinfo("offset_ns %lli, adj %li, drift_acc %li\n", offset_ns, adj, state->offset_pi.drift_acc);
+  ESP_LOGD(TAG, "remote_delta_ns %lli, local_delta_ns %lli, tick_diff %lli", remote_delta_ns, local_delta_ns, tick_diff);
+  ESP_LOGD(TAG, "offset_ns %lli, adj %li, drift_acc %li", offset_ns, adj, state->offset_pi.drift_acc);
 
   // Get the path delay only when clock is stable enough. If we were in process of adjustion (speeding/slowing slave),
   // we would get incorrect delay
@@ -1446,7 +1454,7 @@ static int ptp_update_local_clock(FAR struct ptp_state_s *state,
   const int64_t adj_limit_ns = CONFIG_NETUTILS_PTPD_SETTIME_THRESHOLD_MS
                                * (int64_t)NSEC_PER_MSEC;
 
-  ptpinfo("Local time: %lld.%09ld, remote time %lld.%09ld\n",
+  ESP_LOGD(TAG, "Local time: %lld.%09ld, remote time %lld.%09ld",
           (long long)local_timestamp->tv_sec,
           (long)local_timestamp->tv_nsec,
           (long long)remote_timestamp->tv_sec,
@@ -1482,7 +1490,7 @@ static int ptp_update_local_clock(FAR struct ptp_state_s *state,
 
       if (ret == OK)
         {
-          ptpinfo("Jumped to timestamp %lld.%09ld s\n",
+          ESP_LOGI(TAG, "Jumped to timestamp %lld.%09ld s",
                   (long long)new_time.tv_sec, (long)new_time.tv_nsec);
         }
       else
@@ -1587,7 +1595,7 @@ static int ptp_update_local_clock(FAR struct ptp_state_s *state,
       state->last_delta_timestamp = *local_timestamp;
       state->last_adjtime_ns = adjustment_ns;
 
-      ptpinfo("Delta: %+lld ns, adjustment %+lld ns, drift rate %+lld ppb\n",
+      ESP_LOGD(TAG, "Delta: %+lld ns, adjustment %+lld ns, drift rate %+lld ppb",
               (long long)delta_ns,
               (long long)state->last_adjtime_ns,
               (long long)state->drift_ppb);
@@ -1639,7 +1647,7 @@ static int ptp_process_sync(FAR struct ptp_state_s *state,
 
       state->twostep_rxtime = state->rxtime;
       state->twostep_packet = *msg;
-      ptpinfo("Waiting for follow-up\n");
+      ESP_LOGD(TAG, "Waiting for follow-up");
       return OK;
     }
 
@@ -1847,17 +1855,17 @@ static int ptp_process_rx_packet(FAR struct ptp_state_s *state,
   {
 #ifdef CONFIG_NETUTILS_PTPD_CLIENT
     case PTP_MSGTYPE_ANNOUNCE:
-      ptpinfo("Got announce packet, seq %ld\n",
+      ESP_LOGD(TAG, "Got announce packet, seq %ld",
               (long)ptp_get_sequence(&state->rxbuf.header));
       return ptp_process_announce(state, &state->rxbuf.announce);
 
     case PTP_MSGTYPE_SYNC:
-      ptpinfo("Got sync packet, seq %ld\n",
+      ESP_LOGD(TAG, "Got sync packet, seq %ld",
               (long)ptp_get_sequence(&state->rxbuf.header));
       return ptp_process_sync(state, &state->rxbuf.sync);
 
     case PTP_MSGTYPE_FOLLOW_UP:
-      ptpinfo("Got follow-up packet, seq %ld\n",
+      ESP_LOGD(TAG, "Got follow-up packet, seq %ld",
               (long)ptp_get_sequence(&state->rxbuf.header));
       return ptp_process_followup(state, &state->rxbuf.follow_up);
 

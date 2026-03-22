@@ -61,6 +61,7 @@ struct aes67_ptp_ctx {
     /* Cached status values */
     int32_t offset_ns;
     int32_t path_delay_ns;
+    int32_t jitter_ns;      /* drift rate in ppb, used as jitter indicator */
 
     /* Stats logging counter (prints every N polls) */
     int stats_counter;
@@ -151,9 +152,11 @@ static void ptp_monitor_task(void *arg)
             continue;
         }
 
-        /* Cache latest offset and path delay */
+        /* Cache latest offset and path delay.
+         * last_delta_ns is the measured clock error from the most recent sync. */
         ctx->offset_ns = (int32_t)status.last_delta_ns;
         ctx->path_delay_ns = (int32_t)status.path_delay_ns;
+        ctx->jitter_ns = (int32_t)status.drift_ppb;
 
         /* Extract grandmaster identity from status struct */
         memcpy(ctx->grandmaster_id, status.clock_source_info.gm_id, 8);
@@ -230,10 +233,11 @@ static void ptp_monitor_task(void *arg)
                          0xFF, 0xFE,
                          ctx->own_mac[3], ctx->own_mac[4], ctx->own_mac[5]);
             } else {
-                ESP_LOGI(TAG, "[%s/%s] offset: %+ld ns, path delay: %ld ns, "
+                ESP_LOGI(TAG, "[%s/%s] offset: %+ld ns, delay: %ld ns, drift: %+ld ppb, "
                          "GM: %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X",
                          role, lock,
                          (long)ctx->offset_ns, (long)ctx->path_delay_ns,
+                         (long)ctx->jitter_ns,
                          ctx->grandmaster_id[0], ctx->grandmaster_id[1],
                          ctx->grandmaster_id[2], ctx->grandmaster_id[3],
                          ctx->grandmaster_id[4], ctx->grandmaster_id[5],
@@ -403,7 +407,7 @@ esp_err_t aes67_ptp_get_status(aes67_ptp_handle_t handle, aes67_ptp_status_t *st
     status->domain = handle->config.domain;
     status->offset_ns = handle->offset_ns;
     status->path_delay_ns = handle->path_delay_ns;
-    status->jitter_ns = 0;
+    status->jitter_ns = handle->jitter_ns;
 
     /* When acting as grandmaster, report our own EUI-64 as the GM ID */
     if (handle->is_grandmaster) {

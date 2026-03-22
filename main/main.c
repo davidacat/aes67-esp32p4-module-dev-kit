@@ -27,11 +27,12 @@
 #include "esp_eth_mac.h"
 #include "esp_eth_phy.h"
 
-#include <math.h>
+#include <string.h>
 #include "aes67.h"
 #include "aes67_session.h"
 #include "aes67_rtp.h"
 #include "aes67_sap.h"
+#include "dsps_tone_gen.h"
 
 static const char *TAG = "main";
 
@@ -257,48 +258,45 @@ void app_main(void)
                                               2, AES67_CODEC_L24, &source_id));
 
     ESP_LOGI(TAG, "AES67 source stream active (id=%u, 2ch L24 @ 48kHz)", source_id);
-    ESP_LOGI(TAG, "node ready -- streaming 1kHz test tone");
-
-    /* Generate a 1kHz sine wave test tone into the source stream.
-     * The audio frame callback handles I2S DMA, but we also inject
-     * a software-generated tone directly into the RTP source buffer
-     * so other AES67 devices can verify reception without needing
-     * the ES8311 codec to be initialized via I2C. */
 
     aes67_source_t src_info;
     aes67_session_get_source(session, source_id, &src_info);
 
-    const uint32_t sample_rate = 48000;
-    const uint32_t tone_freq = 1000;
-    const uint32_t samples_per_packet = (sample_rate * 1000) / 1000000; /* 48 for 1ms */
-    const double amplitude = 0.5; /* -6 dBFS */
-    const double two_pi = 2.0 * M_PI;
+    const uint32_t samples_per_packet = 48; /* 48kHz * 1ms */
 
-    uint32_t phase_sample = 0;
-    int32_t tone_buf[samples_per_packet * 2]; /* stereo */
+    /* Use esp-dsp tone generator to precompute one full period of
+     * a 1kHz sine wave at 48kHz into a float buffer, then convert
+     * to 24-bit int32 once. The LUT is only 48 samples. */
+    const uint32_t tone_period = 48; /* 48000 / 1000 */
+    float tone_float[tone_period];
+    dsps_tone_gen_f32(tone_float, tone_period, 0.5f,
+                      1000.0f / 48000.0f, 0.0f);
+
+    /* Convert float LUT to 24-bit left-justified int32 */
+    int32_t sine_lut[tone_period];
+    for (uint32_t n = 0; n < tone_period; n++) {
+        sine_lut[n] = (int32_t)(tone_float[n] * 8388607.0f) << 8;
+    }
+
+    /* Stereo interleaved buffer for one packet */
+    int32_t tone_buf[samples_per_packet * 2];
+    uint32_t phase = 0;
+
+    ESP_LOGI(TAG, "node ready -- streaming 1kHz test tone at -6 dBFS");
 
     while (1) {
-        /* Fill one packet worth of stereo samples with 1kHz sine */
+        /* Fill packet from precomputed LUT (zero float math in loop) */
         for (uint32_t i = 0; i < samples_per_packet; i++) {
-            double t = (double)phase_sample / (double)sample_rate;
-            double val = amplitude * sin(two_pi * tone_freq * t);
-
-            /* Convert to 24-bit left-justified in 32-bit (L24 format) */
-            int32_t sample = (int32_t)(val * 8388607.0) << 8;
-            tone_buf[i * 2 + 0] = sample;  /* left */
-            tone_buf[i * 2 + 1] = sample;  /* right */
-
-            phase_sample++;
-            if (phase_sample >= sample_rate) {
-                phase_sample = 0;
-            }
+            int32_t sample = sine_lut[phase];
+            tone_buf[i * 2 + 0] = sample;
+            tone_buf[i * 2 + 1] = sample;
+            phase++;
+            if (phase >= tone_period) phase = 0;
         }
 
-        /* Write the tone into the RTP source stream buffer */
         aes67_rtp_source_write(src_info.rtp_stream,
                                tone_buf, samples_per_packet);
 
-        /* Pace at the packet rate (1ms) */
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }

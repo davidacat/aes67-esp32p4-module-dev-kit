@@ -315,8 +315,8 @@ static esp_err_t ethernet_init(esp_eth_handle_t *out_eth_handle)
     emac_config.clock_config.rmii.clock_gpio = ETH_REF_CLK_GPIO;
 
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
-    mac_config.flags = ETH_MAC_FLAG_PIN_TO_CORE;  /* Pin to core 0 for cache coherency */
-    mac_config.rx_task_prio = 22;  /* High priority: Ethernet hook feeds audio ISR */
+    mac_config.flags = ETH_MAC_FLAG_PIN_TO_CORE;  /* Pin to core 0 */
+    mac_config.rx_task_prio = 24;  /* Highest: above lwIP (23), feeds audio ISR directly */
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
     if (!mac) {
         ESP_LOGE(TAG, "failed to create EMAC");

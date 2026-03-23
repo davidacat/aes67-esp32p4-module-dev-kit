@@ -526,10 +526,11 @@ void app_main(void)
 
     /* Create stream buffer for Ethernet hook -> playback task path.
      * 30 packets (~120ms at 4ms ptime) absorbs network jitter.
-     * Trigger at one full packet so playback task wakes on complete frames. */
+     * Trigger at 1 byte: playback task uses two-stage read to batch
+     * multiple packets per i2s_channel_write call. */
     {
         uint32_t pkt_bytes = 192 * aes67_cfg.audio.channels * sizeof(int32_t);
-        s_hook_sbuf = xStreamBufferCreate(pkt_bytes * 30, pkt_bytes);
+        s_hook_sbuf = xStreamBufferCreate(pkt_bytes * 30, 1);
     }
 
     /* Set up the Ethernet hook's I2S channel (for stats, not direct write) */

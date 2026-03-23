@@ -183,35 +183,37 @@ static void playback_task(void *arg)
             continue;
         }
 
-        /* Pre-buffer: wait for enough data to fill the DMA ring before
-         * starting writes. This prevents initial underruns and gives
-         * headroom to absorb network jitter. With auto_clear=false,
-         * i2s_channel_write blocks at 48kHz rate (DMA pacing). */
         size_t frame_align = ch * sizeof(int32_t);
-        uint32_t prefill_bytes = 192 * ch * sizeof(int32_t) * 3;  /* 3 packets */
         if (!sink_found) {
             continue;
         }
 
-        /* Wait for data with timeout. With auto_clear=false,
-         * i2s_channel_write provides 48kHz pacing. The timeout here
-         * detects stream stop and flushes silence to avoid replay. */
-        size_t received = xStreamBufferReceive(sbuf, pcm_buf, buf_bytes,
+        /* Two-stage read: first blocking wait for at least one packet,
+         * then immediately drain ALL accumulated data non-blocking.
+         * This batches multiple packets into one i2s_channel_write call,
+         * amortizing the ~0.4ms task scheduling overhead that otherwise
+         * causes 10% throughput loss (4ms DMA cycle + 0.4ms overhead). */
+        size_t received = xStreamBufferReceive(sbuf, pcm_buf, frame_align,
                                                 pdMS_TO_TICKS(20));
         if (received < frame_align) {
-            /* No data: write silence to flush DMA ring.
-             * With auto_clear=false, old data replays forever unless
-             * we explicitly push zeros through all DMA descriptors. */
+            /* Stream stopped: flush silence through all DMA descriptors.
+             * With auto_clear=false, old data replays unless we push zeros. */
             i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
             if (tx && node->config.output_mode == AES67_OUTPUT_I2S) {
                 memset(pcm_buf, 0, buf_bytes);
-                for (int d = 0; d < 4; d++) {  /* Flush all DMA descriptors */
+                for (int d = 0; d < 4; d++) {
                     size_t written = 0;
                     i2s_channel_write(tx, pcm_buf, 192 * frame_align,
                                       &written, pdMS_TO_TICKS(10));
                 }
             }
             continue;
+        }
+        /* Drain all remaining data immediately (non-blocking) */
+        if (received < buf_bytes) {
+            size_t extra = xStreamBufferReceive(sbuf, (uint8_t *)pcm_buf + received,
+                                                buf_bytes - received, 0);
+            received += extra;
         }
 
         /* Align to frame boundary */

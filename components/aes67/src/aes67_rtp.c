@@ -460,19 +460,8 @@ static void rx_task_func(void *arg)
         if (recv_len < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 drain_pass = 0;
-                /* Packet arrival watchdog -- disabled when raw PCB is active
-                 * (raw PCB intercepts packets before socket). */
-                if (!engine->raw_pcb) {
-                    int64_t now = esp_timer_get_time();
-                    if (last_pkt_time_us == 0) last_pkt_time_us = now;
-                    if ((now - last_pkt_time_us) > 500000) {
-                        if ((now - last_stall_warn_us) > 1000000) {
-                            ESP_LOGW(TAG, "RX stall: no pkt for %lld ms",
-                                     (long long)((now - last_pkt_time_us) / 1000));
-                            last_stall_warn_us = now;
-                        }
-                    }
-                }
+                /* Stall watchdog disabled: Ethernet hook handles RTP
+                 * reception at L2, so the socket RX path sees nothing. */
                 continue;
             }
             if (!engine->running) {

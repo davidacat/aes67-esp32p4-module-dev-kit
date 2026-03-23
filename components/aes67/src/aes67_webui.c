@@ -806,7 +806,7 @@ esp_err_t aes67_webui_start(aes67_webui_handle_t handle)
     config.max_uri_handlers = 16;
     config.stack_size = 8192;
     config.lru_purge_enable = true;
-    config.max_open_sockets = 7;
+    config.max_open_sockets = 4;
     config.core_id = 1;  /* Run HTTP server on core 1 (audio on core 0) */
 
     esp_err_t ret = httpd_start(&handle->httpd, &config);

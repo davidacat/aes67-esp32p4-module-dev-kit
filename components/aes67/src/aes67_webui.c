@@ -17,6 +17,7 @@
 #include "aes67_ptp.h"
 #include "aes67_rtp.h"
 #include "aes67_sap.h"
+#include "aes67_sdp.h"
 #include "aes67_net.h"
 
 #include <stdlib.h>
@@ -776,9 +777,23 @@ static void ws_push_task(void *arg)
                 aes67_net_u32_to_ip(remote.origin_ip, origin_str, sizeof(origin_str));
                 if (!first) buf[pos++] = ',';
                 first = false;
+                /* Parse SDP to extract stream details */
+                aes67_sdp_t sdp = {0};
+                const char *codec_str = "?";
+                uint32_t rate = 0;
+                uint8_t ch = 0;
+                uint16_t ptime = 0;
+                if (aes67_sdp_parse(remote.sdp, &sdp) == ESP_OK) {
+                    codec_str = aes67_codec_to_str(sdp.codec);
+                    rate = sdp.sample_rate;
+                    ch = sdp.channels;
+                    ptime = sdp.ptime_us;
+                }
                 pos += snprintf(buf + pos, JSON_BUF_SIZE - pos,
-                    "{\"name\":\"%s\",\"origin\":\"%s\"}",
-                    remote.name, origin_str);
+                    "{\"name\":\"%s\",\"origin\":\"%s\",\"codec\":\"%s\","
+                    "\"rate\":%lu,\"ch\":%u,\"ptime\":%u}",
+                    remote.name, origin_str, codec_str,
+                    (unsigned long)rate, ch, ptime);
                 if (pos >= JSON_BUF_SIZE - 128) break;
             }
         }

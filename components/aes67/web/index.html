@@ -183,7 +183,8 @@ function renderRemotes(arr){
   var h="";
   for(var i=0;i<arr.length;i++){
     var r=arr[i];
-    h+='<div class="re"><span>'+esc(r.name)+' <span class="lbl">('+esc(r.origin)+')</span></span><button class="btn" onclick="sR(\''+esc(r.origin)+"','"+esc(r.name)+'\')">Subscribe</button></div>';
+    var info=r.codec?(esc(r.codec)+' / '+fmt(r.rate)+'Hz / '+r.ch+'ch / '+((r.ptime||0)/1000).toFixed(1)+'ms'):'';
+    h+='<div class="re"><span>'+esc(r.name)+' <span class="lbl">('+esc(r.origin)+')</span>'+(info?' <span class="lbl">'+info+'</span>':'')+'</span><button class="btn" onclick="sR(\''+esc(r.origin)+"','"+esc(r.name)+'\')">Subscribe</button></div>';
   }
   c.innerHTML=h;
 }

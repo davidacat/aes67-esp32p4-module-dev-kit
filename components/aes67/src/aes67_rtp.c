@@ -423,9 +423,10 @@ static void rx_task_func(void *arg)
         return;
     }
 
-    /* Temporary buffer for converted samples (worst case: max channels * max frames) */
+    /* Temporary buffer for converted samples. 192 frames covers 4ms at 48kHz,
+     * which is the practical AES67 maximum. */
     int32_t *sample_buf = heap_caps_malloc(
-        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * AES67_MAX_TIC_FRAMES * sizeof(int32_t),
+        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 192 * sizeof(int32_t),
         MALLOC_CAP_INTERNAL);
     if (!sample_buf) {
         ESP_LOGE(TAG, "Failed to allocate sample conversion buffer");
@@ -563,9 +564,9 @@ static void rx_task_func(void *arg)
         }
         uint32_t frames = payload_len / frame_size_bytes;
 
-        /* Limit to conversion buffer capacity */
+        /* Limit to conversion buffer capacity (192 frames max) */
         uint32_t max_frames = CONFIG_AES67_MAX_CHANNELS_PER_STREAM *
-                              AES67_MAX_TIC_FRAMES / channels;
+                              192 / channels;
         if (frames > max_frames) frames = max_frames;
 
         stream->convert_from_net(payload, sample_buf, frames, channels);
@@ -637,13 +638,12 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     engine->rx_task = NULL;
     engine->stream_count = 0;
 
-    /* Stream buffer: sized for max packet payload * buffering depth.
-     * Max single packet = MAX_TIC_FRAMES * MAX_CHANNELS * 4 bytes (int32).
-     * Buffer 8 packets for jitter absorption. Trigger at 1 packet. */
-    uint32_t max_pkt_native = AES67_MAX_TIC_FRAMES *
-                              CONFIG_AES67_MAX_CHANNELS_PER_STREAM * sizeof(int32_t);
-    uint32_t sbuf_size = max_pkt_native * 8;
-    engine->audio_stream_buf = xStreamBufferCreate(sbuf_size, max_pkt_native);
+    /* Stream buffer: sized for practical worst-case, not theoretical max.
+     * AES67 mandates max 8 channels, max 4ms packet time at 48kHz = 192 frames.
+     * 192 * 8ch * 4 bytes = 6144 per packet. Buffer 8 packets = 49152. */
+    uint32_t practical_max_pkt = 192 * CONFIG_AES67_MAX_CHANNELS_PER_STREAM * sizeof(int32_t);
+    uint32_t sbuf_size = practical_max_pkt * 8;
+    engine->audio_stream_buf = xStreamBufferCreate(sbuf_size, practical_max_pkt);
 
     /* Raw lwIP UDP PCB -- bypasses socket layer for RTP receive.
      * Processes packets directly in lwIP callback context. */
@@ -663,7 +663,7 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
 
     /* Pre-allocate conversion buffer for the raw callback */
     engine->raw_sample_buf = heap_caps_malloc(
-        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * AES67_MAX_TIC_FRAMES * sizeof(int32_t),
+        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 192 * sizeof(int32_t),
         MALLOC_CAP_INTERNAL);
     if (!engine->audio_stream_buf) {
         ESP_LOGE(TAG, "Failed to create audio stream buffer");

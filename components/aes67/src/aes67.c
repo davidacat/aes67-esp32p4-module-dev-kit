@@ -128,60 +128,35 @@ static void audio_frame_task(void *arg)
 static void playback_task(void *arg)
 {
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
+    const uint8_t ch = node->config.audio.channels;
 
-    /* Compute stream params from config */
-    aes67_stream_params_t params;
-    aes67_stream_params_compute(&params,
-                                node->config.audio.sample_rate,
-                                node->config.audio.channels,
-                                node->config.audio.word_length,
-                                node->config.audio.packet_time_us);
-
-    const uint32_t spp = params.samples_per_packet;
-    const uint32_t max_packets = 3;  /* Read up to 3 packets per cycle */
-    const uint8_t ch = params.channels;
-    const uint32_t pkt_native_bytes = params.packet_native_size;
-
-    int32_t *buf = heap_caps_malloc(pkt_native_bytes, MALLOC_CAP_INTERNAL);
-    if (!buf) {
+    /* Playback buffer: holds up to 192 frames (4ms at 48kHz, AES67 max).
+     * Reads whatever is available from the stream buffer and writes to I2S.
+     * auto_clear=true ensures silence when not fed. */
+    const uint32_t max_frames = 192;
+    const uint32_t buf_bytes = max_frames * ch * sizeof(int32_t);
+    int32_t *pcm_buf = heap_caps_malloc(buf_bytes, MALLOC_CAP_INTERNAL);
+    if (!pcm_buf) {
         ESP_LOGE(TAG, "Playback task: alloc failed");
         vTaskDelete(NULL);
         return;
     }
 
-    /* Allocate playback double-buffers (sized to actual stream params) */
-    int32_t *pcm_buf = heap_caps_malloc(pkt_native_bytes, MALLOC_CAP_INTERNAL);
-    int32_t *prev_buf = heap_caps_malloc(pkt_native_bytes, MALLOC_CAP_INTERNAL);
-    if (!pcm_buf || !prev_buf) {
-        ESP_LOGE(TAG, "Playback task: double-buffer alloc failed");
-        heap_caps_free(buf);
-        heap_caps_free(pcm_buf);
-        heap_caps_free(prev_buf);
-        vTaskDelete(NULL);
-        return;
-    }
-    bool have_prev = false;
+    ESP_LOGI(TAG, "Playback task started (ch=%u, auto_clear=on)", ch);
 
-    /* Functions declared in aes67_audio.h and aes67_rtp.h */
-
-    ESP_LOGI(TAG, "Playback task started (spp=%lu, ch=%u, pkt=%lu bytes)",
-             (unsigned long)spp, ch, (unsigned long)pkt_native_bytes);
-
-    aes67_rtp_stream_handle_t cached_sink = NULL;
-    bool prefilled = false;
     uint32_t total_frames = 0;
     uint32_t write_count = 0;
-    int64_t start_us = 0;
+    bool sink_found = false;
 
     while (node->running) {
-        if (!cached_sink) {
-            prefilled = false;
+        /* Wait for a sink to be added */
+        if (!sink_found) {
             int sink_count = aes67_session_get_sink_count(node->session);
             for (int s = 0; s < sink_count && s < CONFIG_AES67_MAX_SINKS; s++) {
                 aes67_sink_t sink;
                 if (aes67_session_get_sink(node->session, s, &sink) == ESP_OK &&
                     sink.enabled && sink.rtp_stream) {
-                    cached_sink = sink.rtp_stream;
+                    sink_found = true;
                     ESP_LOGI(TAG, "Playback: locked to sink '%s' "
                              "(ch=%u, wl=%u, rate=%lu, ptime=%lu us)",
                              sink.name, sink.rtp_config.channels,
@@ -191,19 +166,13 @@ static void playback_task(void *arg)
                     break;
                 }
             }
-            if (!cached_sink) {
+            if (!sink_found) {
                 vTaskDelay(pdMS_TO_TICKS(100));
                 continue;
             }
         }
 
-        if (!prefilled) {
-            prefilled = true;
-            start_us = esp_timer_get_time();
-            ESP_LOGI(TAG, "Playback: stream buffer tight-loop mode");
-        }
-
-        /* Try external hook stream buffer first, fall back to RTP engine's */
+        /* Get the stream buffer (external hook or RTP engine's) */
         extern StreamBufferHandle_t s_hook_sbuf;
         StreamBufferHandle_t sbuf = s_hook_sbuf ? s_hook_sbuf :
                                      aes67_rtp_engine_get_stream_buf(node->rtp);
@@ -212,59 +181,46 @@ static void playback_task(void *arg)
             continue;
         }
 
-        /* DMA-paced playback with auto_clear=false:
-         * 1. Write previous data to output (BLOCKS until DMA frees descriptor)
-         * 2. During the block, raw callback fills stream buffer
-         * 3. Read new data from stream buffer (should be ready instantly)
-         * 4. Loop to step 1 with the new data */
-        const uint32_t pkt_bytes = pkt_native_bytes;
-        uint32_t frames = spp;
-
-        /* Output routing based on config output_mode */
-        if (have_prev) {
-            switch (node->config.output_mode) {
-            case AES67_OUTPUT_I2S: {
-                i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
-                if (tx) {
-                    size_t written = 0;
-                    i2s_channel_write(tx, prev_buf, pkt_bytes,
-                                      &written, portMAX_DELAY);
-                }
-                break;
-            }
-            case AES67_OUTPUT_CALLBACK:
-                if (node->config.audio_cb) {
-                    node->config.audio_cb(prev_buf, frames, ch,
-                                          params.word_length,
-                                          params.sample_rate,
-                                          node->config.audio_cb_user_data);
-                }
-                /* Pace at packet rate to avoid spinning */
-                vTaskDelay(pdMS_TO_TICKS(1));
-                break;
-            case AES67_OUTPUT_STREAM_BUFFER:
-                /* App reads from the same stream buffer we read from.
-                 * In this mode, we don't consume -- just pass through.
-                 * The stream buffer IS the output. Skip writing. */
-                vTaskDelay(pdMS_TO_TICKS(1));
-                break;
-            }
+        /* Read whatever is available, up to one DMA descriptor worth.
+         * Block up to 4ms waiting for data. auto_clear handles silence. */
+        size_t frame_align = ch * sizeof(int32_t);  /* Bytes per frame */
+        size_t received = xStreamBufferReceive(sbuf, pcm_buf, buf_bytes,
+                                                pdMS_TO_TICKS(4));
+        if (received < frame_align) {
+            continue;  /* Not enough for even one frame */
         }
 
-        size_t avail = xStreamBufferBytesAvailable(sbuf);
-        if (avail >= pkt_bytes) {
-            xStreamBufferReceive(sbuf, pcm_buf, pkt_bytes, 0);
-            memcpy(prev_buf, pcm_buf, pkt_bytes);
-            have_prev = true;
-        } else if (!have_prev) {
-            vTaskDelay(pdMS_TO_TICKS(2));
-            continue;
+        /* Align to frame boundary */
+        uint32_t frames = received / frame_align;
+        uint32_t aligned_bytes = frames * frame_align;
+
+        /* Route to output */
+        switch (node->config.output_mode) {
+        case AES67_OUTPUT_I2S: {
+            i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
+            if (tx) {
+                size_t written = 0;
+                i2s_channel_write(tx, pcm_buf, aligned_bytes,
+                                  &written, portMAX_DELAY);
+            }
+            break;
+        }
+        case AES67_OUTPUT_CALLBACK:
+            if (node->config.audio_cb) {
+                node->config.audio_cb(pcm_buf, frames, ch,
+                                      node->config.audio.word_length,
+                                      node->config.audio.sample_rate,
+                                      node->config.audio_cb_user_data);
+            }
+            break;
+        case AES67_OUTPUT_STREAM_BUFFER:
+            /* Data stays in stream buffer for app consumption */
+            break;
         }
 
         total_frames += frames;
         write_count++;
 
-        /* Show RECENT fps (last 1000 writes) instead of cumulative average */
         if ((write_count % 1000) == 0) {
             static int64_t last_stat_us = 0;
             static uint32_t last_stat_frames = 0;
@@ -283,9 +239,7 @@ static void playback_task(void *arg)
         }
     }
 
-    heap_caps_free(buf);
     heap_caps_free(pcm_buf);
-    heap_caps_free(prev_buf);
     ESP_LOGI(TAG, "Playback task stopped");
     vTaskDelete(NULL);
 }

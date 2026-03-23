@@ -341,11 +341,12 @@ static esp_err_t ethernet_init(esp_eth_handle_t *out_eth_handle)
 
     /* Ethernet RTP hook: intercept RTP at MAC level before lwIP */
     s_original_priv = eth_netif;
+    /* 192 frames * max channels covers the AES67 practical max (4ms at 48kHz) */
     s_hook_tmp32 = heap_caps_malloc(
-        AES67_MAX_TIC_FRAMES * AES67_MAX_CHANNELS_PER_STREAM * sizeof(int32_t),
+        192 * AES67_MAX_CHANNELS_PER_STREAM * sizeof(int32_t),
         MALLOC_CAP_INTERNAL);
     s_hook_i16 = heap_caps_malloc(
-        AES67_MAX_TIC_FRAMES * AES67_MAX_CHANNELS_PER_STREAM * sizeof(int16_t),
+        192 * AES67_MAX_CHANNELS_PER_STREAM * sizeof(int16_t),
         MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     esp_eth_update_input_path_info(eth_handle, eth_rtp_hook, eth_netif);
     ESP_LOGI(TAG, "Ethernet RTP hook installed");
@@ -514,16 +515,11 @@ void app_main(void)
     ESP_ERROR_CHECK(aes67_node_start(node));
 
     /* Create stream buffer for Ethernet hook -> playback task path.
-     * Sized for max packet * 8 packets of buffering. */
+     * Size for ~40ms of buffering at max packet size (192 frames stereo int32).
+     * Trigger at 1 byte for low latency - playback task handles framing. */
     {
-        aes67_stream_params_t sp;
-        aes67_stream_params_compute(&sp,
-                                    aes67_cfg.audio.sample_rate,
-                                    aes67_cfg.audio.channels,
-                                    aes67_cfg.audio.word_length,
-                                    aes67_cfg.audio.packet_time_us);
-        uint32_t pkt_native = sp.packet_native_size;
-        s_hook_sbuf = xStreamBufferCreate(pkt_native * 8, pkt_native);
+        uint32_t max_pkt = 192 * aes67_cfg.audio.channels * sizeof(int32_t);
+        s_hook_sbuf = xStreamBufferCreate(max_pkt * 10, 1);
     }
 
     /* Set up the Ethernet hook's I2S channel (for stats, not direct write) */

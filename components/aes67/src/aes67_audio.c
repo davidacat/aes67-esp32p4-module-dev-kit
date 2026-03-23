@@ -24,9 +24,11 @@ static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA descriptor count. Frame count per descriptor is computed
- * from the audio config's samples_per_packet at init time. */
+/* I2S DMA: 4 descriptors at 192 frames each = 768 frames = 16ms.
+ * DMA descriptor size is independent of RTP packet time --
+ * it's an I2S driver buffering parameter, not a network parameter. */
 #define DMA_DESC_NUM            4
+#define DMA_FRAME_NUM           192
 
 
 struct aes67_audio_ctx {
@@ -304,8 +306,8 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     /* Official ESP-IDF es8311 example for ESP32-P4 uses I2S_NUM_0 */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
-    chan_cfg.dma_frame_num = ctx->frame_size;  /* Derived from sample_rate * packet_time */
-    chan_cfg.auto_clear = false;   /* DMA pacing via write blocking */
+    chan_cfg.dma_frame_num = DMA_FRAME_NUM;
+    chan_cfg.auto_clear = true;    /* Output silence when DMA not fed */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {
@@ -444,8 +446,8 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
     extern void aes67_audio_read_clock_divider(aes67_audio_handle_t h);
     aes67_audio_read_clock_divider(handle);
 
-    ESP_LOGI(TAG, "Audio started (DMA: %d desc x %lu frames)",
-             DMA_DESC_NUM, (unsigned long)handle->frame_size);
+    ESP_LOGI(TAG, "Audio started (DMA: %d desc x %d frames, auto_clear=on)",
+             DMA_DESC_NUM, DMA_FRAME_NUM);
     return ESP_OK;
 }
 

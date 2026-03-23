@@ -39,16 +39,7 @@ int aes67_codec_from_str(const char *name)
     return -1;
 }
 
-uint8_t aes67_codec_word_length(aes67_codec_t codec)
-{
-    switch (codec) {
-    case AES67_CODEC_L16:   return 2;
-    case AES67_CODEC_L24:   return 3;
-    case AES67_CODEC_L32:   return 4;
-    case AES67_CODEC_AM824: return 4;
-    default:                return 3;
-    }
-}
+/* aes67_codec_word_length() is now inline in aes67_config.h */
 
 int aes67_sdp_generate(const aes67_sdp_t *sdp, char *buf, size_t buf_len)
 {

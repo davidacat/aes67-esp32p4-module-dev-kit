@@ -42,6 +42,13 @@ menu "AES67 RAVENNA Component"
         help
             Bytes per audio sample. 2=L16, 3=L24, 4=L32.
 
+    config AES67_DEFAULT_CHANNELS
+        int "Default channel count"
+        default 2
+        range 1 8
+        help
+            Default number of audio channels per stream (1=mono, 2=stereo, up to 8).
+
     config AES67_RTP_PORT
         int "Default RTP port"
         default 5004

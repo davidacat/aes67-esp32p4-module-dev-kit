@@ -1450,6 +1450,7 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   if (adj_ppb > 200000) adj_ppb = 200000;
   if (adj_ppb < -200000) adj_ppb = -200000;
 
+#ifndef AES67_DISABLE_PTP_PI
   /* Use the ppb-based API (ETH_MAC_ESP_CMD_ADJ_PTP_TIME) which calls
    * emac_hal_ptp_adj_inc. This is idempotent: it always computes the
    * new addend relative to the stored base addend, avoiding the
@@ -1459,6 +1460,10 @@ static void ptp_lock_local_clock_freq(FAR struct ptp_state_s *state,
   if (adj_err != ESP_OK) {
     ESP_LOGW(TAG, "PTP freq adj failed: %s", esp_err_to_name(adj_err));
   }
+#else
+  (void)adj_ppb;
+  /* PI disabled: PTP clock runs free, no frequency discipline */
+#endif
 
   /* Track timestamps for drift measurement */
   int64_t remote_time_ns = timespec_to_ns(remote_timestamp);

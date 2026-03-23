@@ -233,12 +233,9 @@ static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
         s_isr_partial++;
         memset((uint8_t *)event->dma_buf + received, 0,
                event->size - received);
-        /* Buffer underrun after prefill: reset and re-prefill */
-        s_isr_prefilled = false;
     } else {
         s_isr_empty++;
         memset(event->dma_buf, 0, event->size);
-        s_isr_prefilled = false;  /* Re-prefill on next data */
     }
 
     /* Flush CPU cache so DMA sees the new data */

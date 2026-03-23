@@ -55,6 +55,9 @@ typedef struct {
     /* Media clock offset (a=mediaclk) */
     bool has_mediaclk;
     uint32_t mediaclk_offset;
+
+    /* Stream direction for SDP attribute (a=sendonly / a=recvonly) */
+    bool is_source;             /* true = sendonly, false = recvonly */
 } aes67_sdp_t;
 
 /**

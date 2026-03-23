@@ -150,6 +150,18 @@ void aes67_audio_slot_write(const void *data, uint32_t len);
 void aes67_audio_log_isr_stats(void);
 
 /**
+ * Initialize I2S RX capture for source (TX) streams.
+ * The DMA ISR copies captured int32 samples to a stream buffer.
+ * Must be called BEFORE aes67_audio_start().
+ */
+void aes67_audio_init_capture(aes67_audio_handle_t handle);
+
+/**
+ * Get the capture stream buffer for reading captured I2S audio.
+ */
+StreamBufferHandle_t aes67_audio_get_capture_buf(aes67_audio_handle_t handle);
+
+/**
  * Adjust the I2S TX MCLK divider for adaptive clock recovery.
  * ppm_adj: parts-per-million adjustment. +100 = 0.01% faster.
  */

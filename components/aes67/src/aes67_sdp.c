@@ -104,7 +104,7 @@ int aes67_sdp_generate(const aes67_sdp_t *sdp, char *buf, size_t buf_len)
         "a=framecount:%" PRIu32 "\r\n"
         "a=rtpmap:%u %s/%" PRIu32 "/%u\r\n"
         "a=ptime:%s\r\n"
-        "a=recvonly\r\n",
+        "a=%s\r\n",
         username, sdp->session_id, sdp->session_version, origin_ip_str,
         sdp->session_name,
         conn_ip_str, sdp->ttl,
@@ -112,7 +112,8 @@ int aes67_sdp_generate(const aes67_sdp_t *sdp, char *buf, size_t buf_len)
         sdp->channels,
         framecount,
         sdp->payload_type, codec_str, sdp->sample_rate, sdp->channels,
-        ptime_str);
+        ptime_str,
+        sdp->is_source ? "sendonly" : "recvonly");
 
     if (written < 0 || (size_t)written >= buf_len) {
         ESP_LOGE(TAG, "SDP buffer overflow during generate");

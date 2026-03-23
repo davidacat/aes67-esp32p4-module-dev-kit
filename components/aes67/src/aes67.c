@@ -90,7 +90,17 @@ static void audio_frame_task(void *arg)
         spp * node->config.audio.channels * sizeof(int32_t),
         MALLOC_CAP_INTERNAL);
 
-    ESP_LOGI(TAG, "Audio frame task started (hw-timed TX+RX)");
+    /* Capture buffer for I2S RX -> source stream feeding */
+    StreamBufferHandle_t cap_buf = aes67_audio_get_capture_buf(node->audio);
+    int32_t *cap_samples = NULL;
+    if (cap_buf) {
+        cap_samples = heap_caps_malloc(
+            spp * node->config.audio.channels * sizeof(int32_t),
+            MALLOC_CAP_INTERNAL);
+    }
+
+    ESP_LOGI(TAG, "Audio frame task started (hw-timed TX%s)",
+             cap_buf ? "+capture" : "");
 
     while (node->running) {
         /* Wait for the hardware PTP frame timer ISR */
@@ -106,12 +116,27 @@ static void audio_frame_task(void *arg)
         uint32_t rtp_ts = aes67_ptp_time_to_rtp_ts(
             ptp_time_ns, node->config.audio.sample_rate);
 
+        /* Feed captured I2S audio into source stream ring buffers.
+         * The RX DMA ISR writes captured int32 samples to cap_buf.
+         * We read one packet worth and write to all active sources. */
+        if (cap_buf && cap_samples) {
+            uint32_t need = spp * node->config.audio.channels * sizeof(int32_t);
+            size_t got = xStreamBufferReceive(cap_buf, cap_samples, need, 0);
+            if (got >= need) {
+                /* Write captured audio to all active source streams */
+                for (int i = 0; i < CONFIG_AES67_MAX_SOURCES; i++) {
+                    aes67_source_t src;
+                    if (aes67_session_get_source(node->session, i, &src) == ESP_OK &&
+                        src.enabled && src.rtp_stream) {
+                        aes67_rtp_source_write(src.rtp_stream, cap_samples, spp);
+                    }
+                }
+            }
+        }
+
         /* TX: Process all active source streams - read from ring buffers,
          * convert to network format, send RTP packets */
         aes67_rtp_engine_process_tx(node->rtp, rtp_ts);
-
-        /* RX playback is handled by a dedicated playback task.
-         * The TIC task only handles TX (source streams). */
     }
 
     ESP_LOGI(TAG, "Audio frame task stopped");

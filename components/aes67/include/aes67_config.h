@@ -21,7 +21,7 @@ extern "C" {
 
 /* ---- Version ---- */
 #define AES67_VERSION_MAJOR  2
-#define AES67_VERSION_MINOR  0
+#define AES67_VERSION_MINOR  2
 #define AES67_VERSION_PATCH  0
 
 /* ---- Limits ---- */

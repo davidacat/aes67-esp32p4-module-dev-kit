@@ -284,11 +284,44 @@ void aes67_audio_set_isr_stream_buf(aes67_audio_handle_t handle,
                                      StreamBufferHandle_t sbuf)
 {
     (void)handle;
-    /* Create a byte-stream buffer: 64KB, trigger at 1 byte.
-     * Handles any ptime (1ms to 4ms packets) by concatenating bytes.
-     * The ISR reads exactly 1536 bytes per fire (one DMA descriptor). */
     s_isr_stream_buf = xStreamBufferCreate(65536, 1);
-    ESP_LOGI("aes67_audio", "ISR stream buffer: 64KB byte-stream");
+    ESP_LOGI("aes67_audio", "ISR playback stream buffer: 64KB");
+}
+
+/* --- I2S RX Capture ISR (I2S -> AES67 TX source) --- */
+
+/* Capture stream buffer: RX DMA ISR writes here, TIC task reads */
+static StreamBufferHandle_t s_capture_stream_buf = NULL;
+
+/* RX DMA ISR: fires when a DMA descriptor finishes capturing.
+ * Copies captured int32 samples to the capture stream buffer.
+ * The TIC task reads from this buffer to feed RTP source streams. */
+static IRAM_ATTR bool on_i2s_rx_recv(i2s_chan_handle_t handle,
+                                      i2s_event_data_t *event,
+                                      void *user_ctx)
+{
+    if (s_capture_stream_buf && event->size > 0) {
+        BaseType_t woken = pdFALSE;
+        xStreamBufferSendFromISR(s_capture_stream_buf, event->dma_buf,
+                                  event->size, &woken);
+        return woken == pdTRUE;
+    }
+    return false;
+}
+
+/* Get the capture stream buffer (called by TIC task to read captured audio) */
+StreamBufferHandle_t aes67_audio_get_capture_buf(aes67_audio_handle_t handle)
+{
+    (void)handle;
+    return s_capture_stream_buf;
+}
+
+/* Initialize capture stream buffer for I2S RX -> RTP TX path */
+void aes67_audio_init_capture(aes67_audio_handle_t handle)
+{
+    (void)handle;
+    s_capture_stream_buf = xStreamBufferCreate(65536, 1);
+    ESP_LOGI("aes67_audio", "ISR capture stream buffer: 64KB");
 }
 
 /* Legacy staging ISR (unused, kept for reference) */
@@ -542,7 +575,7 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
      * This bypasses i2s_channel_write and the playback task entirely. */
     if ((s_isr_stream_buf != NULL)) {
         i2s_event_callbacks_t cbs = {
-            .on_recv = NULL,
+            .on_recv = s_capture_stream_buf ? on_i2s_rx_recv : NULL,
             .on_recv_q_ovf = NULL,
             .on_sent = on_i2s_tx_sent_sbuf,
             .on_send_q_ovf = NULL,

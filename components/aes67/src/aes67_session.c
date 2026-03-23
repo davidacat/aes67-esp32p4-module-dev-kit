@@ -213,6 +213,7 @@ esp_err_t aes67_session_add_source(aes67_session_handle_t handle,
      * synced to a GM yet, so default to "traceable" which is what
      * most AES67 devices advertise. The SDP will be re-announced
      * via SAP periodically, picking up the current GM state. */
+    sdp.is_source = true;  /* This is a TX source: a=sendonly */
     sdp.has_ptp_refclk = true;
     sdp.ptp_traceable = true;
     sdp.ptp_domain = mgr->config.ptp.domain;

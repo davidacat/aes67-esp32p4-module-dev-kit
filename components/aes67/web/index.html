@@ -93,16 +93,16 @@ function fmtUp(s){
 
 function el(id){return document.getElementById(id)}
 
-function dotClass(lock){return lock===2?"dot-g":lock===1||lock===3?"dot-a":"dot-r"}
+function dotClass(lock){return lock==="locked"?"dot-g":lock==="locking"||lock==="acquiring"?"dot-a":"dot-r"}
 
 function renderStreams(arr,isSink){
   if(!arr||!arr.length)return'<span class="lbl">None</span>';
   var h="";
   for(var i=0;i<arr.length;i++){
     var s=arr[i];
-    h+='<div class="stream"><div class="sname">'+(s.enabled?'<span class="dot dot-g"></span>':'<span class="dot dot-r"></span>')+
-      esc(s.name)+'</div><div class="sinfo">'+esc(s.codec)+' / '+fmt(s.rate)+' Hz / '+s.ch+'ch / '+
-      (s.ptime/1000).toFixed(1)+'ms</div><div class="sinfo">'+(isSink?"RX":"TX")+": "+fmt(isSink?s.rx:s.tx)+" pkts";
+    var on=isSink?s.active:true;
+    h+='<div class="stream"><div class="sname">'+(on?'<span class="dot dot-g"></span>':'<span class="dot dot-r"></span>')+
+      esc(s.name)+'</div><div class="sinfo">'+(isSink?"RX":"TX")+": "+fmt(isSink?s.rx:s.tx)+" pkts";
     if(isSink)h+=" | Lost: "+fmt(s.lost)+" | Jitter: "+fmt(s.jitter)+"\u00b5s";
     h+="</div></div>";
   }
@@ -114,8 +114,8 @@ function renderRemotes(arr){
   var h="";
   for(var i=0;i<arr.length;i++){
     var r=arr[i];
-    h+='<div class="rentry"><span>'+esc(r.name)+' <span class="lbl">('+esc(r.ip)+')</span></span>'+
-      '<button class="btn" onclick="subRemote(\''+esc(r.ip)+'\',\''+esc(r.name)+'\')">Subscribe</button></div>';
+    h+='<div class="rentry"><span>'+esc(r.name)+' <span class="lbl">('+esc(r.origin)+')</span></span>'+
+      '<button class="btn" onclick="subRemote(\''+esc(r.origin)+'\',\''+esc(r.name)+'\')">Subscribe</button></div>';
   }
   el("remotes-list").innerHTML=h;
 }
@@ -128,7 +128,7 @@ function onMsg(e){
   /* PTP */
   var p=d.ptp||{};
   el("ptp-dot").className="dot "+dotClass(p.lock);
-  el("ptp-lock").textContent=PTP_STATES[p.lock]||"Unknown";
+  el("ptp-lock").textContent=p.lock||"Unknown";
   el("ptp-gm").textContent=p.gm||"--";
   el("ptp-off").textContent=fmt(p.offset);
   el("ptp-jit").textContent=fmt(p.jitter);
@@ -137,10 +137,10 @@ function onMsg(e){
   el("sources").innerHTML=renderStreams(d.sources,false);
   el("sinks").innerHTML=renderStreams(d.sinks,true);
   /* Remotes */
-  renderRemotes(d.remotes);
+  renderRemotes(d.sap_remotes);
   /* Footer */
   el("ft-up").textContent=fmtUp(d.uptime);
-  el("ft-heap").textContent=fmt(d.heap)+" B";
+  el("ft-heap").textContent=fmt(d.heap_free)+" B";
   var eth=d.eth||{};
   el("ft-rtp").textContent=fmt(eth.rtp_pps);
   el("ft-tot").textContent=fmt(eth.total);
@@ -155,9 +155,9 @@ function wsConnect(){
   ws.onerror=function(){ws.close()};
 }
 
-function subRemote(ip,name){
+function subRemote(origin,name){
   fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({name:name,ip:ip})});
+    body:JSON.stringify({name:name,origin:origin})});
 }
 
 function manualSub(){

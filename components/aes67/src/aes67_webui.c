@@ -650,6 +650,7 @@ static void ws_push_task(void *arg)
         /* Start building JSON */
         int pos = snprintf(buf, JSON_BUF_SIZE,
             "{"
+            "\"t\":\"status\","
             "\"uptime\":%lu,"
             "\"heap_free\":%lu,"
             "\"ptp\":{\"lock\":\"%s\",\"gm\":\"%s\",\"offset\":%ld,\"jitter\":%ld,\"delay\":%ld},",

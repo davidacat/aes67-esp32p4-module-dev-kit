@@ -173,76 +173,61 @@ static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
 
 /* --- DMA callbacks -------------------------------------------------------- */
 
-/* --- Slot-based audio ring for ISR playback --- */
+/* --- StreamBuffer-based ISR playback --- */
 
-/* Fixed-size slot ring: each slot = one DMA descriptor (1536 bytes for
- * stereo int32 at 192 frames). The Ethernet hook writes to the next
- * free slot. The DMA ISR reads from the next filled slot.
- * Uses volatile indices + RISC-V fences for memory ordering.
- * No FreeRTOS primitives, no locks, no stream buffer. */
-#define AUDIO_SLOT_SIZE     1536    /* bytes per slot (192 * 2ch * 4) */
-#define AUDIO_SLOT_COUNT    16      /* ~64ms buffer at 4ms/slot */
-
-static uint8_t s_audio_slots[AUDIO_SLOT_COUNT][AUDIO_SLOT_SIZE]
-    __attribute__((aligned(64)));   /* Cache-line aligned */
-static volatile uint32_t s_slot_wr = 0;  /* Next slot to write (hook) */
-static volatile uint32_t s_slot_rd = 0;  /* Next slot to read (ISR) */
-static volatile bool s_slot_ring_active = false;
+/* The Ethernet hook writes variable-size packets (52-192 frames depending
+ * on source ptime). The DMA ISR reads exactly 1536 bytes per fire
+ * (one descriptor). A byte-stream buffer naturally handles variable
+ * packet sizes by concatenating them until the ISR has a full descriptor. */
+static StreamBufferHandle_t s_isr_stream_buf = NULL;
 
 /* ISR diagnostics */
 static volatile uint32_t s_isr_fires = 0;
 static volatile uint32_t s_isr_full = 0;
 static volatile uint32_t s_isr_empty = 0;
 
-/* Write one packet to the next slot (called from Ethernet hook) */
+/* Write audio data to the stream buffer (called from Ethernet hook).
+ * Handles any packet size -- multiple small packets accumulate until
+ * the ISR reads a full DMA descriptor. */
 void aes67_audio_slot_write(const void *data, uint32_t len)
 {
-    if (!s_slot_ring_active || len > AUDIO_SLOT_SIZE) return;
-
-    uint32_t wr = s_slot_wr;
-    uint32_t rd = s_slot_rd;
-    uint32_t next_wr = (wr + 1) % AUDIO_SLOT_COUNT;
-
-    /* Full check: if next_wr == rd, ring is full, drop packet */
-    if (next_wr == rd) return;
-
-    memcpy(s_audio_slots[wr], data, len);
-    if (len < AUDIO_SLOT_SIZE) {
-        memset(s_audio_slots[wr] + len, 0, AUDIO_SLOT_SIZE - len);
+    if (s_isr_stream_buf && len > 0) {
+        xStreamBufferSend(s_isr_stream_buf, data, len, 0);
     }
-
-    /* Fence: ensure data is written before updating the write index */
-    __asm__ __volatile__("fence rw, rw" ::: "memory");
-    s_slot_wr = next_wr;
 }
 
-/* ISR callback: fires when DMA descriptor finishes playing */
+/* ISR callback: reads exactly event->size bytes from the stream buffer
+ * to fill one DMA descriptor. With a fast source (918 pps) there's
+ * always enough data. With a slow source (225 pps) some ISR fires
+ * will find insufficient data and play partial silence. */
 static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
                                             i2s_event_data_t *event,
                                             void *user_ctx)
 {
+    BaseType_t woken = pdFALSE;
     s_isr_fires++;
 
-    /* Fence: ensure we see latest write index */
-    __asm__ __volatile__("fence rw, rw" ::: "memory");
-
-    uint32_t rd = s_slot_rd;
-    uint32_t wr = s_slot_wr;
-
-    if (rd != wr) {
-        /* Data available: copy slot to DMA buffer */
-        memcpy(event->dma_buf, s_audio_slots[rd], event->size);
-        s_slot_rd = (rd + 1) % AUDIO_SLOT_COUNT;
-        s_isr_full++;
+    if (s_isr_stream_buf) {
+        size_t received = xStreamBufferReceiveFromISR(s_isr_stream_buf,
+                                                       event->dma_buf,
+                                                       event->size,
+                                                       &woken);
+        if (received >= event->size) {
+            s_isr_full++;
+        } else {
+            s_isr_empty++;
+            if (received < event->size) {
+                memset((uint8_t *)event->dma_buf + received, 0,
+                       event->size - received);
+            }
+        }
     } else {
-        /* Empty: silence */
-        memset(event->dma_buf, 0, event->size);
         s_isr_empty++;
+        memset(event->dma_buf, 0, event->size);
     }
 
-    /* Flush CPU cache -> DMA can see the data */
     esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-    return false;
+    return woken == pdTRUE;
 }
 
 /* Log ISR stats */
@@ -255,28 +240,26 @@ void aes67_audio_log_isr_stats(void)
     s_isr_full = 0;
     s_isr_empty = 0;
     if (fires > 0) {
-        uint32_t wr = s_slot_wr;
-        uint32_t rd = s_slot_rd;
-        uint32_t fill = (wr >= rd) ? (wr - rd) : (AUDIO_SLOT_COUNT - rd + wr);
-        ESP_LOGI("dma_isr", "fires=%lu full=%lu empty=%lu (%lu%%) slots=%lu/%d",
+        size_t sb = s_isr_stream_buf ?
+                    xStreamBufferBytesAvailable(s_isr_stream_buf) : 0;
+        ESP_LOGI("dma_isr", "fires=%lu full=%lu empty=%lu (%lu%%) sb=%u",
                  (unsigned long)fires, (unsigned long)full,
                  (unsigned long)empty,
-                 fires > 0 ? (unsigned long)(full * 100 / fires) : 0,
-                 (unsigned long)fill, AUDIO_SLOT_COUNT);
+                 (unsigned long)(full * 100 / fires),
+                 (unsigned)sb);
     }
 }
 
-/* Initialize the slot ring (called from main before audio start) */
+/* Initialize stream buffer for ISR playback */
 void aes67_audio_set_isr_stream_buf(aes67_audio_handle_t handle,
                                      StreamBufferHandle_t sbuf)
 {
     (void)handle;
-    (void)sbuf;
-    s_slot_wr = 0;
-    s_slot_rd = 0;
-    s_slot_ring_active = true;
-    ESP_LOGI("aes67_audio", "Slot ring initialized: %d slots x %d bytes = %d bytes",
-             AUDIO_SLOT_COUNT, AUDIO_SLOT_SIZE, AUDIO_SLOT_COUNT * AUDIO_SLOT_SIZE);
+    /* Create a byte-stream buffer: 64KB, trigger at 1 byte.
+     * Handles any ptime (1ms to 4ms packets) by concatenating bytes.
+     * The ISR reads exactly 1536 bytes per fire (one DMA descriptor). */
+    s_isr_stream_buf = xStreamBufferCreate(65536, 1);
+    ESP_LOGI("aes67_audio", "ISR stream buffer: 64KB byte-stream");
 }
 
 /* Legacy staging ISR (unused, kept for reference) */
@@ -411,7 +394,7 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     /* When using ISR callback, auto_clear doesn't matter because the ISR
      * fills every descriptor (with data or silence). Set false for
      * i2s_channel_write compatibility in non-ISR modes. */
-    chan_cfg.auto_clear = s_slot_ring_active;
+    chan_cfg.auto_clear = (s_isr_stream_buf != NULL);
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {
@@ -528,7 +511,7 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
 
     /* Register DMA ISR callback for direct stream buffer -> DMA transfer.
      * This bypasses i2s_channel_write and the playback task entirely. */
-    if (s_slot_ring_active) {
+    if ((s_isr_stream_buf != NULL)) {
         i2s_event_callbacks_t cbs = {
             .on_recv = NULL,
             .on_recv_q_ovf = NULL,

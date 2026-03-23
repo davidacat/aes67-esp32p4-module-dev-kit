@@ -16,11 +16,6 @@
 extern "C" {
 #endif
 
-/* Component version */
-#define AES67_VERSION_MAJOR 0
-#define AES67_VERSION_MINOR 1
-#define AES67_VERSION_PATCH 0
-
 /* Opaque handle for an AES67 node instance */
 typedef struct aes67_node *aes67_node_handle_t;
 
@@ -80,6 +75,20 @@ esp_err_t aes67_node_get_config(aes67_node_handle_t handle, aes67_config_t *conf
  */
 esp_err_t aes67_node_get_session(aes67_node_handle_t handle,
                                   aes67_session_handle_t *session);
+
+/**
+ * Get the audio driver handle from a running node.
+ */
+#include "aes67_audio.h"
+esp_err_t aes67_node_get_audio(aes67_node_handle_t handle,
+                               aes67_audio_handle_t *audio);
+
+/**
+ * Get the SAP handle from a running node.
+ */
+#include "aes67_sap.h"
+esp_err_t aes67_node_get_sap(aes67_node_handle_t handle,
+                              aes67_sap_handle_t *sap);
 
 #ifdef __cplusplus
 }

@@ -153,6 +153,30 @@ esp_err_t aes67_rtp_sink_read(aes67_rtp_stream_handle_t stream,
 esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,
                                       uint32_t rtp_timestamp);
 
+/**
+ * Get the stream buffer used for RTP RX -> playback decoupling.
+ */
+#include "freertos/stream_buffer.h"
+StreamBufferHandle_t aes67_rtp_engine_get_stream_buf(aes67_rtp_engine_handle_t handle);
+
+/**
+ * Set the task to notify when new sink data arrives.
+ */
+#include "freertos/task.h"
+void aes67_rtp_engine_set_notify_task(aes67_rtp_engine_handle_t handle,
+                                      TaskHandle_t task);
+
+/**
+ * Enable/disable direct I2S playback from the RTP RX path.
+ */
+void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t handle,
+                                   void *audio_handle);
+
+/**
+ * Get available frames in a sink stream's jitter buffer.
+ */
+uint32_t aes67_rtp_sink_available(aes67_rtp_stream_handle_t stream);
+
 #ifdef __cplusplus
 }
 #endif

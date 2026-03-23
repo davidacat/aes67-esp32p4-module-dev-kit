@@ -46,7 +46,7 @@
 static aes67_session_handle_t s_session = NULL;
 static bool s_sink_added = false;
 
-/* Stream params for the Ethernet RTP hook (set from SDP when sink added) */
+/* Stream params for the Ethernet RTP hook (defined below, used by SAP callback) */
 extern uint8_t s_hook_word_length;
 extern uint8_t s_hook_channels;
 
@@ -533,8 +533,6 @@ void app_main(void)
 
     /* Set up the Ethernet hook's I2S channel (for stats, not direct write) */
     {
-        extern i2s_chan_handle_t aes67_audio_get_tx_chan(void *h);
-        extern esp_err_t aes67_node_get_audio(aes67_node_handle_t h, aes67_audio_handle_t *a);
         aes67_audio_handle_t audio = NULL;
         aes67_node_get_audio(node, &audio);
         s_hook_tx_chan = aes67_audio_get_tx_chan(audio);
@@ -560,8 +558,6 @@ void app_main(void)
     aes67_sap_handle_t sap = NULL;
     /* Get SAP handle from the node config - it's stored internally.
      * For now, register via the session manager's SAP handle. */
-    extern esp_err_t aes67_node_get_sap(aes67_node_handle_t handle,
-                                         aes67_sap_handle_t *sap);
     if (aes67_node_get_sap(node, &sap) == ESP_OK && sap) {
         aes67_sap_register_cb(sap, sap_discovery_cb, NULL);
         ESP_LOGI(TAG, "SAP auto-subscribe enabled");

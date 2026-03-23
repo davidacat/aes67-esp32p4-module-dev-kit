@@ -104,6 +104,38 @@ esp_err_t aes67_audio_get_buffer_levels(aes67_audio_handle_t handle,
                                         uint32_t *capture_frames,
                                         uint32_t *playback_frames);
 
+/**
+ * Write int32 samples directly to I2S via i2s_channel_write.
+ * Blocks until DMA has room (used for DMA-paced playback).
+ */
+esp_err_t aes67_audio_direct_write(aes67_audio_handle_t handle,
+                                   const int32_t *samples, uint32_t frame_count);
+
+/**
+ * Get the I2S TX channel handle (for DMA-paced playback).
+ */
+#include "driver/i2s_types.h"
+i2s_chan_handle_t aes67_audio_get_tx_chan(aes67_audio_handle_t handle);
+
+/**
+ * Write int16 stereo samples to the staging ring buffer.
+ * Called by the playback task; the DMA ISR reads from this ring.
+ */
+esp_err_t aes67_audio_staging_write(aes67_audio_handle_t handle,
+                                     const int16_t *samples, uint32_t sample_count);
+
+/**
+ * Get DMA staging statistics.
+ */
+void aes67_audio_get_staging_stats(aes67_audio_handle_t handle,
+                                    uint32_t *isr_count, uint32_t *underruns);
+
+/**
+ * Adjust the I2S TX MCLK divider for adaptive clock recovery.
+ * ppm_adj: parts-per-million adjustment. +100 = 0.01% faster.
+ */
+void aes67_audio_adjust_clock_ppm(aes67_audio_handle_t handle, int32_t ppm_adj);
+
 #ifdef __cplusplus
 }
 #endif

@@ -29,9 +29,9 @@
 
 static const char *TAG = "aes67";
 
-/* mDNS init/deinit live in aes67_mdns.c */
-extern esp_err_t aes67_mdns_init(const char *node_name, uint16_t rtp_port);
-extern void aes67_mdns_deinit(void);
+/* mDNS init/deinit -- declared here since aes67_mdns.c has no header */
+esp_err_t aes67_mdns_init(const char *node_name, uint16_t rtp_port);
+void aes67_mdns_deinit(void);
 
 /* Define the event base for the ESP event loop */
 ESP_EVENT_DEFINE_BASE(AES67_EVENT);
@@ -162,10 +162,7 @@ static void playback_task(void *arg)
     }
     bool have_prev = false;
 
-    extern esp_err_t aes67_audio_direct_write(
-        aes67_audio_handle_t handle,
-        const int32_t *samples, uint32_t frame_count);
-    extern uint32_t aes67_rtp_sink_available(aes67_rtp_stream_handle_t stream);
+    /* Functions declared in aes67_audio.h and aes67_rtp.h */
 
     ESP_LOGI(TAG, "Playback task started (spp=%lu, ch=%u, pkt=%lu bytes)",
              (unsigned long)spp, ch, (unsigned long)pkt_native_bytes);
@@ -208,7 +205,6 @@ static void playback_task(void *arg)
 
         /* Try external hook stream buffer first, fall back to RTP engine's */
         extern StreamBufferHandle_t s_hook_sbuf;
-        extern StreamBufferHandle_t aes67_rtp_engine_get_stream_buf(void *h);
         StreamBufferHandle_t sbuf = s_hook_sbuf ? s_hook_sbuf :
                                      aes67_rtp_engine_get_stream_buf(node->rtp);
         if (!sbuf) {
@@ -227,7 +223,6 @@ static void playback_task(void *arg)
         const uint32_t pkt_bytes = pkt_native_bytes;
         uint32_t frames = spp;
 
-        extern i2s_chan_handle_t aes67_audio_get_tx_chan(void *h);
         i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
 
         if (have_prev && tx) {
@@ -462,11 +457,7 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
 
     handle->running = true;
 
-    /* Enable direct RTP RX -> staging ring path.
-     * RTP RX task converts and writes to staging inline,
-     * DMA ISR drains staging to I2S. No jitter buffer or playback task. */
-    extern void aes67_rtp_engine_set_playback(aes67_rtp_engine_handle_t h,
-                                               void *audio);
+    /* Enable direct RTP RX -> staging ring path */
     aes67_rtp_engine_set_playback(handle->rtp, handle->audio);
     ESP_LOGI(TAG, "Direct RTP->I2S path enabled (zero-buffer)");
 
@@ -482,8 +473,6 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
                                 21, &pb_task, 1);
 
         /* Register playback task for notification from RTP RX */
-        extern void aes67_rtp_engine_set_notify_task(
-            aes67_rtp_engine_handle_t h, TaskHandle_t task);
         aes67_rtp_engine_set_notify_task(handle->rtp, pb_task);
     }
 

@@ -528,7 +528,7 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
 
     /* Register DMA ISR callback for direct stream buffer -> DMA transfer.
      * This bypasses i2s_channel_write and the playback task entirely. */
-    if (s_slot_ring_active) {
+    if (s_slot_ring_active && 0) {  /* DISABLED: testing if ISR affects EMAC throughput */
         i2s_event_callbacks_t cbs = {
             .on_recv = NULL,
             .on_recv_q_ovf = NULL,

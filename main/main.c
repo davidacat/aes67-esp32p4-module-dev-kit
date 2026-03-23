@@ -293,15 +293,17 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
 
     s_hook_pkt_count++;
 
-    /* Log only on problems or at major milestones */
+    /* Rate-limited loss reporting: max once per second */
     static uint32_t s_last_seq_lost = 0;
-    if (s_hook_seq_lost != s_last_seq_lost) {
-        /* Packet loss detected -- log immediately */
+    static uint32_t s_last_loss_log_pkt = 0;
+    if (s_hook_seq_lost != s_last_seq_lost &&
+        (s_hook_pkt_count - s_last_loss_log_pkt) > 8000) {
         ESP_LOGW("eth_hook", "SEQ LOSS: %lu gaps, %lu lost (total %lu pkts)",
                  (unsigned long)s_hook_seq_gaps,
                  (unsigned long)s_hook_seq_lost,
                  (unsigned long)s_hook_pkt_count);
         s_last_seq_lost = s_hook_seq_lost;
+        s_last_loss_log_pkt = s_hook_pkt_count;
     }
 
     free(buffer);  /* We consumed the frame */

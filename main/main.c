@@ -162,6 +162,7 @@ static int16_t *s_hook_i16 = NULL;
 static uint32_t s_hook_pkt_count = 0;
 static uint32_t s_hook_drop_count = 0;   /* Stream buffer full drops */
 static uint32_t s_hook_fwd_count = 0;    /* Packets forwarded to lwIP (not RTP) */
+static uint32_t s_hook_total_frames = 0; /* ALL Ethernet frames (before filtering) */
 static uint16_t s_hook_last_seq = 0;     /* Last RTP sequence number */
 static uint32_t s_hook_seq_gaps = 0;     /* Sequence discontinuities */
 static uint32_t s_hook_seq_lost = 0;     /* Total lost packets (from seq gaps) */
@@ -175,6 +176,8 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
                                           uint8_t *buffer, uint32_t length,
                                           void *priv, void *info)
 {
+    s_hook_total_frames++;
+
     /* Quick reject: minimum Ethernet+IP+UDP+RTP header = 54 bytes */
     if (length < 54 || !s_hook_tx_chan) goto forward;
 
@@ -631,26 +634,33 @@ void app_main(void)
 
     ESP_LOGI(TAG, "node ready (TX source disabled for RX throughput test)");
 
-    /* Log stats every 2 seconds with hook pps */
+    /* Log stats every 2 seconds */
     extern void aes67_audio_log_isr_stats(void);
-    uint32_t last_hook_count = 0;
-    TickType_t last_hook_tick = 0;
+    uint32_t last_total = 0, last_rtp = 0, last_fwd = 0;
+    TickType_t last_tick = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         aes67_audio_log_isr_stats();
 
-        uint32_t now_count = s_hook_pkt_count;
+        uint32_t now_total = s_hook_total_frames;
+        uint32_t now_rtp = s_hook_pkt_count;
+        uint32_t now_fwd = s_hook_fwd_count;
         TickType_t now_tick = xTaskGetTickCount();
-        if (last_hook_tick > 0 && now_count > last_hook_count) {
-            uint32_t delta_pkts = now_count - last_hook_count;
-            uint32_t delta_ms = (now_tick - last_hook_tick) * portTICK_PERIOD_MS;
-            if (delta_ms > 0) {
-                ESP_LOGI("eth_hook", "pps=%lu (in %lu ms)",
-                         (unsigned long)(delta_pkts * 1000UL / delta_ms),
-                         (unsigned long)delta_ms);
+        if (last_tick > 0) {
+            uint32_t dt_ms = (now_tick - last_tick) * portTICK_PERIOD_MS;
+            if (dt_ms > 0) {
+                uint32_t total_fps = (now_total - last_total) * 1000UL / dt_ms;
+                uint32_t rtp_pps = (now_rtp - last_rtp) * 1000UL / dt_ms;
+                uint32_t fwd_pps = (now_fwd - last_fwd) * 1000UL / dt_ms;
+                ESP_LOGI("eth_hook", "ALL=%lu/s RTP=%lu/s fwd=%lu/s",
+                         (unsigned long)total_fps,
+                         (unsigned long)rtp_pps,
+                         (unsigned long)fwd_pps);
             }
         }
-        last_hook_count = now_count;
-        last_hook_tick = now_tick;
+        last_total = now_total;
+        last_rtp = now_rtp;
+        last_fwd = now_fwd;
+        last_tick = now_tick;
     }
 }

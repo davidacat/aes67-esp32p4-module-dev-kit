@@ -87,8 +87,8 @@ function fmt(n){return n!=null?Number(n).toLocaleString():"--"}
 
 function fmtUp(s){
   if(s==null)return"--";
-  var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
-  return(d?d+"d ":"")+h+"h "+m+"m";
+  var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),sec=s%60;
+  return(d?d+"d ":"")+h+"h "+m+"m "+sec+"s";
 }
 
 function el(id){return document.getElementById(id)}
@@ -101,8 +101,10 @@ function renderStreams(arr,isSink){
   for(var i=0;i<arr.length;i++){
     var s=arr[i];
     var on=isSink?s.active:true;
-    h+='<div class="stream"><div class="sname">'+(on?'<span class="dot dot-g"></span>':'<span class="dot dot-r"></span>')+
-      esc(s.name)+'</div><div class="sinfo">'+(isSink?"RX":"TX")+": "+fmt(isSink?s.rx:s.tx)+" pkts";
+    h+='<div class="stream"><div style="display:flex;justify-content:space-between;align-items:center">';
+    h+='<span class="sname">'+(on?'<span class="dot dot-g"></span>':'<span class="dot dot-r"></span>')+esc(s.name)+'</span>';
+    if(isSink)h+='<button class="btn" style="background:#c44;font-size:10px;padding:1px 6px" onclick="delSink('+s.id+')">x</button>';
+    h+='</div><div class="sinfo">'+(isSink?"RX":"TX")+": "+fmt(isSink?s.rx:s.tx)+" pkts";
     if(isSink)h+=" | Lost: "+fmt(s.lost)+" | Jitter: "+fmt(s.jitter)+"\u00b5s";
     h+="</div></div>";
   }
@@ -122,6 +124,7 @@ function renderRemotes(arr){
 
 function esc(s){return s?String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"):""}
 
+var lastRtp=0,lastTime=0;
 function onMsg(e){
   var d;try{d=JSON.parse(e.data)}catch(x){return}
   if(d.t!=="status")return;
@@ -138,13 +141,18 @@ function onMsg(e){
   el("sinks").innerHTML=renderStreams(d.sinks,true);
   /* Remotes */
   renderRemotes(d.sap_remotes);
-  /* Footer */
+  /* Footer with computed pps */
   el("ft-up").textContent=fmtUp(d.uptime);
   el("ft-heap").textContent=fmt(d.heap_free)+" B";
   var eth=d.eth||{};
-  el("ft-rtp").textContent=fmt(eth.rtp_pps);
+  var now=Date.now();
+  if(lastTime>0&&eth.rtp>0){
+    var dt=(now-lastTime)/1000;
+    if(dt>0)el("ft-rtp").textContent=fmt(Math.round((eth.rtp-lastRtp)/dt));
+  }
+  lastRtp=eth.rtp||0;lastTime=now;
   el("ft-tot").textContent=fmt(eth.total);
-  el("ft-lost").textContent=fmt(eth.seq_lost);
+  el("ft-lost").textContent=fmt(eth.lost);
 }
 
 function wsConnect(){
@@ -158,6 +166,10 @@ function wsConnect(){
 function subRemote(origin,name){
   fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({name:name,origin:origin})});
+}
+
+function delSink(id){
+  fetch("/api/sinks/"+id,{method:"DELETE"});
 }
 
 function manualSub(){

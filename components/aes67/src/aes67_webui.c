@@ -743,6 +743,16 @@ static void ws_push_task(void *arg)
         }
         pos += snprintf(buf + pos, JSON_BUF_SIZE - pos, "]");
 
+        /* Ethernet hook stats (defined in main.c) */
+        extern uint32_t s_hook_pkt_count;
+        extern uint32_t s_hook_seq_lost;
+        extern uint32_t s_hook_total_frames;
+        pos += snprintf(buf + pos, JSON_BUF_SIZE - pos,
+            ",\"eth\":{\"rtp\":%lu,\"total\":%lu,\"lost\":%lu}",
+            (unsigned long)s_hook_pkt_count,
+            (unsigned long)s_hook_total_frames,
+            (unsigned long)s_hook_seq_lost);
+
         /* Close the JSON object */
         buf[pos++] = '}';
         buf[pos] = '\0';

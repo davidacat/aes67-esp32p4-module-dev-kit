@@ -26,8 +26,8 @@ static const char *TAG = "aes67_audio";
 
 /* I2S DMA: N descriptors at 48 frames (1ms) each.
  * DMA ring latency = (N-1) ms. Lower = less latency, less jitter margin.
- * 3 desc = 2ms latency (~3.7ms total path) */
-#define DMA_DESC_NUM            3
+ * 2 desc = 1ms latency (~2.7ms total path) -- absolute minimum */
+#define DMA_DESC_NUM            2
 #define DMA_FRAME_NUM           48
 
 

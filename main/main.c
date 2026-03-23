@@ -259,6 +259,13 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
     int frames = payload_len / frame_bytes;
     if (frames <= 0 || frames > AES67_MAX_TIC_FRAMES) goto forward;
 
+    /* Log first packet details */
+    if (s_hook_pkt_count == 0) {
+        ESP_DRAM_LOGI("eth_hook", "FIRST PKT: payload=%d bytes, wl=%d, ch=%d, frames=%d, "
+                      "write_bytes=%d", payload_len, wl, ch, frames,
+                      frames * ch * (int)sizeof(int32_t));
+    }
+
     /* Convert to int32 */
     aes67_convert_from_net(payload, s_hook_tmp32, frames, ch, wl);
 

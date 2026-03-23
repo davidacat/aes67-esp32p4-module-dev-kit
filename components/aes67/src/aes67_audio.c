@@ -173,106 +173,50 @@ static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
 
 /* --- DMA callbacks -------------------------------------------------------- */
 
-/* --- Lock-free audio ring buffer in DMA memory (cache-bypassing) --- */
+/* Stream buffer fed by the Ethernet hook. The DMA ISR reads from this
+ * directly, bypassing the playback task entirely for zero overhead. */
+static StreamBufferHandle_t s_isr_stream_buf = NULL;
 
-/* Ring buffer for ISR<->task communication. Allocated in internal SRAM
- * with DMA capability. Uses volatile indices for lock-free access.
- * This avoids the cross-core L1 cache coherency issue that caused
- * the FreeRTOS StreamBuffer approach to lose 10% of data. */
-static uint8_t *s_audio_ring = NULL;
-static uint32_t s_audio_ring_size = 0;
-static volatile uint32_t s_audio_ring_wr = 0;  /* Written by Ethernet hook */
-static volatile uint32_t s_audio_ring_rd = 0;  /* Read by DMA ISR */
-
-/* ISR diagnostics */
+/* ISR diagnostics (read by monitor task) */
 static volatile uint32_t s_isr_fires = 0;
-static volatile uint32_t s_isr_full = 0;
-static volatile uint32_t s_isr_partial = 0;
-static volatile uint32_t s_isr_empty = 0;
+static volatile uint32_t s_isr_full = 0;     /* ISR got a full descriptor of data */
+static volatile uint32_t s_isr_partial = 0;  /* ISR got some data but not full descriptor */
+static volatile uint32_t s_isr_empty = 0;    /* ISR got zero bytes (silence) */
 
-/* Write data to the audio ring (called from task context / Ethernet hook) */
-void aes67_audio_ring_write(const void *data, uint32_t len)
-{
-    if (!s_audio_ring || len == 0) return;
-    uint32_t wr = s_audio_ring_wr;
-    uint32_t rd = s_audio_ring_rd;
-    uint32_t cap = s_audio_ring_size;
-    uint32_t used = (wr >= rd) ? (wr - rd) : (cap - rd + wr);
-    uint32_t free_bytes = cap - 1 - used;
-    if (len > free_bytes) return;  /* Drop if full */
-
-    uint32_t pos = wr % cap;
-    uint32_t first = cap - pos;
-    if (first >= len) {
-        memcpy(s_audio_ring + pos, data, len);
-    } else {
-        memcpy(s_audio_ring + pos, data, first);
-        memcpy(s_audio_ring, (const uint8_t *)data + first, len - first);
-    }
-
-    /* Memory fence: ensure data is written before index update.
-     * Critical for cross-core visibility on ESP32-P4 dual-core RISC-V. */
-    __asm__ __volatile__("fence rw, rw" ::: "memory");
-    s_audio_ring_wr = (wr + len) % cap;
-}
-
-/* ISR callback: fires when a DMA descriptor finishes playing.
- * Reads from the lock-free ring buffer into the DMA descriptor. */
+/* ISR callback: fires when a DMA descriptor finishes playing (every 4ms).
+ * Reads int32 audio data directly from the stream buffer into the DMA
+ * descriptor. If no data is available, writes silence. */
 static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
                                             i2s_event_data_t *event,
                                             void *user_ctx)
 {
+    BaseType_t woken = pdFALSE;
     s_isr_fires++;
 
-    if (!s_audio_ring) {
-        memset(event->dma_buf, 0, event->size);
-        s_isr_empty++;
-        esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        return false;
-    }
-
-    /* Memory fence: ensure we see the latest write index */
-    __asm__ __volatile__("fence rw, rw" ::: "memory");
-
-    uint32_t rd = s_audio_ring_rd;
-    uint32_t wr = s_audio_ring_wr;
-    uint32_t cap = s_audio_ring_size;
-    uint32_t avail = (wr >= rd) ? (wr - rd) : (cap - rd + wr);
-    uint32_t to_read = (avail < event->size) ? avail : event->size;
-
-    if (to_read >= event->size) {
-        s_isr_full++;
-    } else if (to_read > 0) {
-        s_isr_partial++;
+    if (s_isr_stream_buf) {
+        size_t received = xStreamBufferReceiveFromISR(s_isr_stream_buf,
+                                                       event->dma_buf,
+                                                       event->size,
+                                                       &woken);
+        if (received >= event->size) {
+            s_isr_full++;
+        } else if (received > 0) {
+            s_isr_partial++;
+            memset((uint8_t *)event->dma_buf + received, 0,
+                   event->size - received);
+        } else {
+            s_isr_empty++;
+            memset(event->dma_buf, 0, event->size);
+        }
     } else {
         s_isr_empty++;
+        memset(event->dma_buf, 0, event->size);
     }
 
-    /* Copy from ring to DMA buffer */
-    if (to_read > 0) {
-        uint32_t pos = rd % cap;
-        uint32_t first = cap - pos;
-        if (first >= to_read) {
-            memcpy(event->dma_buf, s_audio_ring + pos, to_read);
-        } else {
-            memcpy(event->dma_buf, s_audio_ring + pos, first);
-            memcpy((uint8_t *)event->dma_buf + first, s_audio_ring, to_read - first);
-        }
-    }
-
-    /* Silence-fill remainder */
-    if (to_read < event->size) {
-        memset((uint8_t *)event->dma_buf + to_read, 0,
-               event->size - to_read);
-    }
-
-    /* Update read index */
-    s_audio_ring_rd = (rd + to_read) % cap;
-
-    /* Flush CPU cache so DMA sees the new data */
+    /* Flush CPU cache so DMA sees the new data (ESP32-P4 L1 cache) */
     esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
-    return false;
+    return woken == pdTRUE;
 }
 
 /* Called periodically to log ISR stats */
@@ -287,39 +231,19 @@ void aes67_audio_log_isr_stats(void)
     s_isr_partial = 0;
     s_isr_empty = 0;
     if (fires > 0) {
-        uint32_t rd = s_audio_ring_rd;
-        uint32_t wr = s_audio_ring_wr;
-        uint32_t cap = s_audio_ring_size;
-        uint32_t fill = (wr >= rd) ? (wr - rd) : (cap - rd + wr);
-        ESP_LOGI("dma_isr", "fires=%lu full=%lu partial=%lu empty=%lu (%lu%% util) ring=%lu/%lu",
+        ESP_LOGI("dma_isr", "fires=%lu full=%lu partial=%lu empty=%lu (%lu%% util)",
                  (unsigned long)fires, (unsigned long)full,
                  (unsigned long)partial, (unsigned long)empty,
-                 fires > 0 ? (unsigned long)(full * 100 / fires) : 0,
-                 (unsigned long)fill, (unsigned long)cap);
+                 (unsigned long)(full * 100 / fires));
     }
 }
 
-/* Allocate the audio ring buffer and set up for ISR playback */
+/* Set the stream buffer for ISR-driven playback */
 void aes67_audio_set_isr_stream_buf(aes67_audio_handle_t handle,
                                      StreamBufferHandle_t sbuf)
 {
     (void)handle;
-    (void)sbuf;  /* We don't use the StreamBuffer anymore */
-
-    /* Allocate ring in internal DMA-capable SRAM.
-     * 30 packets * 1536 bytes = 46080 bytes (~45KB) */
-    s_audio_ring_size = 192 * 8 * sizeof(int32_t) * 10;  /* ~10 max packets */
-    s_audio_ring = heap_caps_calloc(1, s_audio_ring_size,
-                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    if (!s_audio_ring) {
-        ESP_LOGE("aes67_audio", "Failed to allocate audio ring (%lu bytes)",
-                 (unsigned long)s_audio_ring_size);
-        return;
-    }
-    s_audio_ring_wr = 0;
-    s_audio_ring_rd = 0;
-    ESP_LOGI("aes67_audio", "Audio ring allocated: %lu bytes in internal SRAM",
-             (unsigned long)s_audio_ring_size);
+    s_isr_stream_buf = sbuf;
 }
 
 /* Legacy staging ISR (unused, kept for reference) */
@@ -454,7 +378,7 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     /* When using ISR callback, auto_clear doesn't matter because the ISR
      * fills every descriptor (with data or silence). Set false for
      * i2s_channel_write compatibility in non-ISR modes. */
-    chan_cfg.auto_clear = (s_audio_ring != NULL);
+    chan_cfg.auto_clear = (s_isr_stream_buf != NULL);
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {
@@ -571,7 +495,7 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
 
     /* Register DMA ISR callback for direct stream buffer -> DMA transfer.
      * This bypasses i2s_channel_write and the playback task entirely. */
-    if (s_audio_ring) {
+    if (s_isr_stream_buf) {
         i2s_event_callbacks_t cbs = {
             .on_recv = NULL,
             .on_recv_q_ovf = NULL,

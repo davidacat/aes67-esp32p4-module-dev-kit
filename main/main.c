@@ -267,8 +267,14 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
         }
     }
 
-    /* Write int32 to the lock-free audio ring (read by DMA ISR) */
-    aes67_audio_ring_write(s_hook_tmp32, frames * ch * sizeof(int32_t));
+    /* Write int32 to stream buffer */
+    if (s_hook_sbuf) {
+        size_t sent = xStreamBufferSend(s_hook_sbuf, s_hook_tmp32,
+                                         frames * ch * sizeof(int32_t), 0);
+        if (sent == 0) {
+            s_hook_drop_count++;
+        }
+    }
 
     s_hook_pkt_count++;
     if ((s_hook_pkt_count % 5000) == 0) {

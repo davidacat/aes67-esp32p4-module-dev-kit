@@ -84,6 +84,17 @@ esp_err_t aes67_net_set_multicast_ttl(int sock, uint8_t ttl)
         ESP_LOGE(TAG, "set multicast TTL failed: errno %d", errno);
         return ESP_FAIL;
     }
+
+    /* Bind multicast output to the local interface so sendto doesn't
+     * fail with EHOSTUNREACH when the default route changes. */
+    uint32_t local_ip = 0;
+    aes67_net_get_local_ip(&local_ip);
+    struct in_addr mcast_if;
+    mcast_if.s_addr = local_ip;
+    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF, &mcast_if, sizeof(mcast_if)) < 0) {
+        ESP_LOGW(TAG, "set IP_MULTICAST_IF failed: errno %d", errno);
+    }
+
     return ESP_OK;
 }
 

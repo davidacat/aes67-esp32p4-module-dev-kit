@@ -711,7 +711,12 @@ static void ws_push_task(void *arg)
                 }
                 if (!first) buf[pos++] = ',';
                 first = false;
+                /* Use Ethernet hook counters for sink stats since the hook
+                 * intercepts RTP at L2 before the RTP engine sees packets */
+                extern uint32_t s_hook_pkt_count;
+                extern uint32_t s_hook_seq_lost;
                 const char *scodec = aes67_codec_to_str(sink.rtp_config.codec);
+                bool active = s_hook_pkt_count > 0;
                 pos += snprintf(buf + pos, JSON_BUF_SIZE - pos,
                     "{\"id\":%u,\"name\":\"%s\",\"codec\":\"%s\",\"rate\":%lu,"
                     "\"ch\":%u,\"ptime\":%u,\"rx\":%lu,\"lost\":%lu,"
@@ -720,10 +725,10 @@ static void ws_push_task(void *arg)
                     (unsigned long)sink.rtp_config.sample_rate,
                     sink.rtp_config.channels,
                     sink.rtp_config.packet_time_us,
-                    (unsigned long)rtp_st.packets_received,
-                    (unsigned long)rtp_st.packets_lost,
+                    (unsigned long)s_hook_pkt_count,
+                    (unsigned long)s_hook_seq_lost,
                     (long)rtp_st.jitter_us,
-                    (rtp_st.status_flags & AES67_RTP_STATUS_RECEIVING) ? "true" : "false");
+                    active ? "true" : "false");
                 if (pos >= JSON_BUF_SIZE - 256) break;
             }
         }

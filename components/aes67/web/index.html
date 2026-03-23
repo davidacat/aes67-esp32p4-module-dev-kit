@@ -81,7 +81,7 @@ footer{border-top:1px solid #333;padding:8px 0;font-size:11px;color:#666;display
 <script>
 (function(){
 var N=4,ws,rto,lRtp=0,lT=0;
-var g=document.getElementById.bind(document);
+function g(id){return document.getElementById(id)}
 
 function fmt(n){return n!=null?Number(n).toLocaleString():"--"}
 function fmtUp(s){

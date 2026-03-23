@@ -736,14 +736,12 @@ static void ws_push_task(void *arg)
         buf[pos++] = '}';
         buf[pos] = '\0';
 
-        /* Send via async WS frame */
-        httpd_ws_frame_t ws_pkt = {
-            .final = true,
-            .fragmented = false,
-            .type = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t *)buf,
-            .len = pos,
-        };
+        /* Send via async WS frame (must be queued through httpd work queue) */
+        httpd_ws_frame_t ws_pkt;
+        memset(&ws_pkt, 0, sizeof(ws_pkt));
+        ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+        ws_pkt.payload = (uint8_t *)buf;
+        ws_pkt.len = pos;
 
         esp_err_t ret = httpd_ws_send_frame_async(ctx->httpd, ctx->ws_fd, &ws_pkt);
         if (ret != ESP_OK) {

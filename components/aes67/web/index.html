@@ -133,14 +133,14 @@ function updateSlots(prefix,arr){
   if(arr)for(i=0;i<arr.length;i++)ids[arr[i].id]=arr[i];
   var any=false;
   for(i=0;i<N;i++){
-    var slot=$(prefix+"-slot-"+i),data=ids[i];
+    var slot=g(prefix+"-slot-"+i),data=ids[i];
     if(data){
       any=true;
       slot.style.display="";
       var on=prefix==="src"?true:data.active;
-      $(prefix+"-"+i+"-dot").className="dot "+(on?"dg":"dr");
-      $(prefix+"-"+i+"-name").textContent=data.name||"--";
-      $(prefix+"-"+i+"-codec").textContent=fc(data);
+      g(prefix+"-"+i+"-dot").className="dot "+(on?"dg":"dr");
+      g(prefix+"-"+i+"-name").textContent=data.name||"--";
+      g(prefix+"-"+i+"-codec").textContent=fc(data);
       if(prefix==="src"){
         g("src-"+i+"-tx").textContent=fmt(data.tx);
       }else{
@@ -156,7 +156,7 @@ function updateSlots(prefix,arr){
       if(ep)ep.style.display="none";
     }
   }
-  $(prefix+"-none").style.display=any?"none":"";
+  g(prefix+"-none").style.display=any?"none":"";
 }
 
 function renderRemotes(arr){

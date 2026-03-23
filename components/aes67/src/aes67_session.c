@@ -444,7 +444,7 @@ esp_err_t aes67_session_remove_source(aes67_session_handle_t handle, uint8_t id)
 
     /* Clear slot */
     char name_copy[64];
-    strncpy(name_copy, src->name, sizeof(name_copy));
+    strlcpy(name_copy, src->name, sizeof(name_copy));
     memset(src, 0, sizeof(*src));
     mgr->source_count--;
 
@@ -479,7 +479,7 @@ esp_err_t aes67_session_remove_sink(aes67_session_handle_t handle, uint8_t id)
 
     /* Clear slot */
     char name_copy[64];
-    strncpy(name_copy, snk->name, sizeof(name_copy));
+    strlcpy(name_copy, snk->name, sizeof(name_copy));
     memset(snk, 0, sizeof(*snk));
     mgr->sink_count--;
 

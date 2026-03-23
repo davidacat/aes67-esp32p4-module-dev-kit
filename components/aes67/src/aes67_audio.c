@@ -24,12 +24,10 @@ static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA: 8 descriptors at 48 frames each = 384 frames = 8ms.
- * 48 frames = 1ms at 48kHz, matching the minimum AES67 ptime.
- * This ensures each ISR fire reads a small, consistent chunk
- * that can be filled by one or more small-ptime packets.
- * More descriptors compensate for the smaller individual size. */
-#define DMA_DESC_NUM            8
+/* I2S DMA: N descriptors at 48 frames (1ms) each.
+ * DMA ring latency = (N-1) ms. Lower = less latency, less jitter margin.
+ * 3 desc = 2ms latency (~3.7ms total path) */
+#define DMA_DESC_NUM            3
 #define DMA_FRAME_NUM           48
 
 

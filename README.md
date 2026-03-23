@@ -4,10 +4,31 @@ An ESP-IDF component implementing the AES67 (and RAVENNA-compatible) audio-over-
 
 ## Performance
 
-- **2.7ms end-to-end latency** (AES67 network to I2S output)
-- **100% DMA utilization** -- zero underruns at 1000 pps
+- **0.7ms end-to-end latency** with ptime=0.125ms source (6 frames at 48kHz)
+- **100% DMA utilization** -- zero underruns at up to 8000 pps
 - **0 packet loss** with IEEE 802.3x flow control
-- Tested continuously at 100k+ packets with zero drops or sequence gaps
+- Tested at 645,000+ packets with zero drops or sequence gaps
+- ISR-driven playback at up to 3000Hz with zero task scheduling overhead
+
+### Latency by Source Ptime
+
+| Source ptime | Packets/sec | ESP32 latency | Total end-to-end |
+|---|---|---|---|
+| 0.125ms (6 frames) | 8000 | 0.4ms | ~0.7ms |
+| 0.333ms (16 frames) | 3000 | 0.5ms | ~1.0ms |
+| 1ms (48 frames) | 1000 | 0.6ms | ~1.7ms |
+| 4ms (192 frames) | 250 | 0.6ms | ~2.7ms |
+
+### Latency Breakdown (ptime=0.125ms, best case)
+
+| Stage | Time |
+|---|---|
+| Source ptime buffering | 0.125ms |
+| Network (LAN) | 0.1ms |
+| Ethernet L2 hook (parse + convert) | 0.1ms |
+| Stream buffer | 0.06ms |
+| DMA ring (2 x 16 frames) | 0.33ms |
+| **Total** | **~0.72ms** |
 
 ## Features
 
@@ -20,14 +41,15 @@ An ESP-IDF component implementing the AES67 (and RAVENNA-compatible) audio-over-
   - L16, L24, L32, AM824 codec support with MTConvert function pointer dispatch
   - Channels: 1-8 per stream with channel routing support
   - Sample rates: 44.1kHz, 48kHz
-  - Packet time: 1ms to 4ms (48 to 192 frames)
+  - Packet time: 0.125ms to 4ms (6 to 192 frames)
+  - Handles 250 to 8000+ packets per second
   - DSCP/QoS marking for network prioritization
   - Ethernet MAC hook for L2 RTP interception (bypasses lwIP entirely)
   - IEEE 802.3x flow control prevents EMAC multicast frame drops
 - **ISR-driven playback** -- zero task scheduling overhead
-  - DMA ISR reads directly from stream buffer at 1000Hz
-  - Sample-hold on underrun (smooth decay, no silence clicks)
-  - 2 DMA descriptors at 48 frames = 1ms ring latency
+  - DMA ISR reads directly from stream buffer at up to 3000Hz
+  - Sample-hold on underrun (smooth decay instead of silence clicks)
+  - 2 DMA descriptors at 16 frames = 0.33ms ring latency
 - **Flexible output routing** per node
   - I2S direct output to DAC (ISR-driven, default)
   - User callback with int32 sample buffers
@@ -50,17 +72,7 @@ An ESP-IDF component implementing the AES67 (and RAVENNA-compatible) audio-over-
   - lwIP IRAM optimizations
   - IPv6 disabled (saves 39KB flash, reduces packet processing)
   - All tasks pinned to core 0 for cache coherency
-
-## Latency Breakdown
-
-| Stage | Time |
-|---|---|
-| Source ptime buffering | 1.0ms |
-| Network (LAN) | 0.1ms |
-| Ethernet L2 hook (parse + convert) | 0.1ms |
-| Stream buffer | 0.5ms |
-| DMA ring (2 descriptors) | 1.0ms |
-| **Total** | **~2.7ms** |
+  - Quiet logging: only reports errors and first lock
 
 ## Hardware
 
@@ -184,12 +196,12 @@ cfg.audio_cb_user_data = NULL;
 
 ```
 Playback (ISR-driven, default):
-  Network -> Ethernet L2 hook -> convert L16/L24 to int32
-          -> StreamBuffer -> DMA ISR (1000Hz) -> I2S -> DAC
+  Network -> Ethernet L2 hook -> convert L16/L24/L32 to int32
+          -> StreamBuffer -> DMA ISR (up to 3000Hz) -> I2S -> DAC
 
-  The DMA ISR fires every 1ms, reads 48 frames from the stream
-  buffer, and fills the DMA descriptor. Two descriptors alternate:
-  one plays while the other is filled. Total ring latency: 1ms.
+  The DMA ISR fires when a descriptor finishes playing, reads from
+  the stream buffer, and fills the next descriptor. Two descriptors
+  alternate: one plays while the other is filled.
 
 Capture:
   ADC -> I2S RX DMA -> capture ring buffer -> RTP TX -> network
@@ -202,8 +214,9 @@ Timing:
 ## Key Design Decisions
 
 - **Ethernet L2 hook** intercepts RTP packets before lwIP, avoiding all TCP/IP stack overhead
-- **ISR-driven playback** eliminates task scheduling jitter that caused 10% throughput loss
-- **IEEE 802.3x flow control** prevents the ESP32-P4 EMAC from dropping multicast frames under load
+- **ISR-driven playback** eliminates task scheduling jitter that caused 10% throughput loss with task-based approach
+- **IEEE 802.3x flow control** prevents the ESP32-P4 EMAC from dropping multicast frames under load (8% loss without it)
 - **Sample-hold on underrun** produces smooth decay instead of audible silence clicks
-- **StreamBuffer byte-stream** handles any packet time (1ms-4ms) transparently
+- **StreamBuffer byte-stream** handles any packet time (0.125ms to 4ms) transparently by accumulating bytes
 - **All tasks on core 0** avoids cross-core L1 cache visibility issues on ESP32-P4 dual RISC-V
+- **DMA descriptors sized to 16 frames** (0.33ms) balances latency vs stability across all ptimes

@@ -97,15 +97,25 @@ static const char *TAG = "main";
 #define ETH_PHY_RST_GPIO    51
 #define ETH_PHY_ADDR        1
 
-/* I2S to ES8311 codec.
- * DOUT = GPIO 9: data FROM ESP32 TO ES8311 (DSDIN pin on codec)
- * DIN  = GPIO 11: data FROM ES8311 TO ESP32 (ASDOUT pin on codec)
- * See ESP-IDF issue #14297 for the DI/DO swap fix. */
+/* I2S pin configuration.
+ *
+ * External I2S DAC (active):
+ *   DOUT=GPIO32, LRCLK=GPIO33, BCLK=GPIO36, MCLK=GPIO13
+ *
+ * ESP32-P4-NANO onboard ES8311 (commented out):
+ *   MCLK=13, SCLK=12, LRCK=10, DOUT=9, DIN=11
+ */
 #define I2S_MCLK_GPIO       13
-#define I2S_SCLK_GPIO       12
-#define I2S_LRCK_GPIO       10
-#define I2S_DOUT_GPIO        9   /* ESP32 output -> codec DSDIN */
-#define I2S_DIN_GPIO        11   /* codec ASDOUT -> ESP32 input */
+#define I2S_SCLK_GPIO       36   /* BCLK -> external DAC */
+#define I2S_LRCK_GPIO       33   /* LRCLK -> external DAC */
+#define I2S_DOUT_GPIO       32   /* Data out -> external DAC */
+#define I2S_DIN_GPIO        11   /* Not used with external DAC */
+/* Onboard ES8311 pins (restore for built-in codec):
+ * #define I2S_SCLK_GPIO    12
+ * #define I2S_LRCK_GPIO    10
+ * #define I2S_DOUT_GPIO     9
+ * #define I2S_DIN_GPIO     11
+ */
 
 /* Power amplifier enable (active high) */
 #define PA_CTRL_GPIO        53

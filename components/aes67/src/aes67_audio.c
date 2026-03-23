@@ -1000,13 +1000,6 @@ esp_err_t aes67_audio_set_sample_rate(aes67_audio_handle_t handle, uint32_t samp
     i2s_channel_disable(handle->tx_chan);
     i2s_channel_disable(handle->rx_chan);
 
-    /* Flush the playback stream buffer -- discard any data from the
-     * old sample rate. Without this, stale data plays at the new rate
-     * causing crackling during the transition. */
-    if (s_isr_stream_buf) {
-        xStreamBufferReset(s_isr_stream_buf);
-    }
-
     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
     clk_cfg.clk_src = I2S_CLK_SRC_APLL;
     clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;

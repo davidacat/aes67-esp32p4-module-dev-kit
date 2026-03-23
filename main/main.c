@@ -631,10 +631,26 @@ void app_main(void)
 
     ESP_LOGI(TAG, "node ready (TX source disabled for RX throughput test)");
 
-    /* Log ISR and hook stats every 5 seconds */
+    /* Log stats every 2 seconds with hook pps */
     extern void aes67_audio_log_isr_stats(void);
+    uint32_t last_hook_count = 0;
+    TickType_t last_hook_tick = 0;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(pdMS_TO_TICKS(2000));
         aes67_audio_log_isr_stats();
+
+        uint32_t now_count = s_hook_pkt_count;
+        TickType_t now_tick = xTaskGetTickCount();
+        if (last_hook_tick > 0 && now_count > last_hook_count) {
+            uint32_t delta_pkts = now_count - last_hook_count;
+            uint32_t delta_ms = (now_tick - last_hook_tick) * portTICK_PERIOD_MS;
+            if (delta_ms > 0) {
+                ESP_LOGI("eth_hook", "pps=%lu (in %lu ms)",
+                         (unsigned long)(delta_pkts * 1000UL / delta_ms),
+                         (unsigned long)delta_ms);
+            }
+        }
+        last_hook_count = now_count;
+        last_hook_tick = now_tick;
     }
 }

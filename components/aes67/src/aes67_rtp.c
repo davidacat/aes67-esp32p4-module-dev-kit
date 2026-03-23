@@ -737,9 +737,9 @@ esp_err_t aes67_rtp_engine_start(aes67_rtp_engine_handle_t handle)
         "aes67_rx",
         AES67_RX_TASK_STACK,
         engine,
-        17,  /* Below lwIP (22) on core 1 */
+        17,  /* Below lwIP (23) */
         &engine->rx_task,
-        1
+        0   /* Core 0: all audio/network on same core for cache coherency */
     );
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create RX task");

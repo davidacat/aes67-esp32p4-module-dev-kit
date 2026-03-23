@@ -37,6 +37,7 @@
 #include "dsps_tone_gen.h"
 #include "driver/i2c.h"
 #include "freertos/stream_buffer.h"
+#include "esp_cache.h"
 #include "driver/i2s_std.h"
 #include "es8311.h"
 
@@ -202,6 +203,14 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
 
     const uint8_t *payload = buffer + payload_off;
     int payload_len = length - payload_off;
+
+    /* Cache invalidation for ESP32-P4's L1 cache.
+     * The ESP-IDF Ethernet driver already does M2C sync in
+     * emac_esp_dma_receive_frame(), but we do it again on the
+     * payload region to be safe. Align to 64-byte cache lines. */
+    uintptr_t align_start = (uintptr_t)buffer & ~63UL;
+    size_t align_len = ((uintptr_t)buffer + length - align_start + 63) & ~63UL;
+    esp_cache_msync((void *)align_start, align_len, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
     /* Handle RTP padding (P bit) */
     if (buffer[rtp_off] & 0x20) {

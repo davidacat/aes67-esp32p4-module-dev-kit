@@ -81,7 +81,7 @@ footer{border-top:1px solid #333;padding:8px 0;font-size:11px;color:#666;display
 <script>
 (function(){
 var N=4,ws,rto,lRtp=0,lT=0;
-var $=document.getElementById.bind(document);
+var g=document.getElementById.bind(document);
 
 function fmt(n){return n!=null?Number(n).toLocaleString():"--"}
 function fmtUp(s){
@@ -125,8 +125,8 @@ function mkSlots(container,prefix,isSink){
   }
 }
 
-mkSlots($("sc"),"src",false);
-mkSlots($("sk"),"sink",true);
+mkSlots(g("sc"),"src",false);
+mkSlots(g("sk"),"sink",true);
 
 function updateSlots(prefix,arr){
   var ids={},i;
@@ -142,17 +142,17 @@ function updateSlots(prefix,arr){
       $(prefix+"-"+i+"-name").textContent=data.name||"--";
       $(prefix+"-"+i+"-codec").textContent=fc(data);
       if(prefix==="src"){
-        $("src-"+i+"-tx").textContent=fmt(data.tx);
+        g("src-"+i+"-tx").textContent=fmt(data.tx);
       }else{
-        $("sink-"+i+"-rx").textContent=fmt(data.rx);
-        $("sink-"+i+"-lost").textContent=fmt(data.lost);
-        $("sink-"+i+"-jitter").textContent=fmt(data.jitter);
-        var ni=$("edit-sink-name-"+i);
+        g("sink-"+i+"-rx").textContent=fmt(data.rx);
+        g("sink-"+i+"-lost").textContent=fmt(data.lost);
+        g("sink-"+i+"-jitter").textContent=fmt(data.jitter);
+        var ni=g("edit-sink-name-"+i);
         if(ni&&document.activeElement!==ni)ni.value=data.name||"";
       }
     }else{
       slot.style.display="none";
-      var ep=$("edit-"+prefix+"-"+i);
+      var ep=g("edit-"+prefix+"-"+i);
       if(ep)ep.style.display="none";
     }
   }
@@ -160,7 +160,7 @@ function updateSlots(prefix,arr){
 }
 
 function renderRemotes(arr){
-  var c=$("rl");
+  var c=g("rl");
   if(!arr||!arr.length){c.innerHTML='<span class="lbl">No remote sources discovered</span>';return}
   var h="";
   for(var i=0;i<arr.length;i++){
@@ -174,22 +174,22 @@ function onMsg(e){
   var d;try{d=JSON.parse(e.data)}catch(x){return}
   if(d.t!=="status")return;
   var p=d.ptp||{};
-  $("pd").className="dot "+dc(p.lock);
-  $("pl").textContent=p.lock||"Unknown";
-  $("pg").textContent=p.gm||"--";
-  $("po").textContent=fmt(p.offset);
-  $("pj").textContent=fmt(p.jitter);
-  $("py").textContent=fmt(p.delay);
+  g("pd").className="dot "+dc(p.lock);
+  g("pl").textContent=p.lock||"Unknown";
+  g("pg").textContent=p.gm||"--";
+  g("po").textContent=fmt(p.offset);
+  g("pj").textContent=fmt(p.jitter);
+  g("py").textContent=fmt(p.delay);
   updateSlots("src",d.sources);
   updateSlots("sink",d.sinks);
   renderRemotes(d.sap_remotes);
-  $("fu").textContent=fmtUp(d.uptime);
-  $("fh").textContent=fmt(d.heap_free)+" B";
+  g("fu").textContent=fmtUp(d.uptime);
+  g("fh").textContent=fmt(d.heap_free)+" B";
   var eth=d.eth||{},now=Date.now();
-  if(lT>0&&eth.rtp!=null){var dt=(now-lT)/1000;if(dt>0.1)$("fr").textContent=fmt(Math.round((eth.rtp-lRtp)/dt))}
+  if(lT>0&&eth.rtp!=null){var dt=(now-lT)/1000;if(dt>0.1)g("fr").textContent=fmt(Math.round((eth.rtp-lRtp)/dt))}
   lRtp=eth.rtp||0;lT=now;
-  $("ft").textContent=fmt(eth.total);
-  $("fl").textContent=fmt(eth.lost);
+  g("ft").textContent=fmt(eth.total);
+  g("fl").textContent=fmt(eth.lost);
 }
 
 function wsConn(){
@@ -201,9 +201,9 @@ function wsConn(){
 }
 
 /* Globals for onclick handlers */
-window.TE=function(t,id){var e=$("edit-"+t+"-"+id);if(e)e.style.display=(!e.style.display||e.style.display==="none")?"block":"none"};
+window.TE=function(t,id){var e=g("edit-"+t+"-"+id);if(e)e.style.display=(!e.style.display||e.style.display==="none")?"block":"none"};
 window.rS=function(id){
-  var n=$("edit-sink-name-"+id),s=$("edit-sink-sdp-"+id);
+  var n=g("edit-sink-name-"+id),s=g("edit-sink-sdp-"+id);
   if(!s||!s.value.trim()){alert("Paste SDP text to re-subscribe");return}
   fetch("/api/sinks/"+id,{method:"DELETE"}).then(function(){
     return fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n?n.value:"Sink",sdp:s.value})});
@@ -212,14 +212,14 @@ window.rS=function(id){
 window.sR=function(o,n){fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,origin:o})})};
 window.dS=function(id){fetch("/api/sinks/"+id,{method:"DELETE"})};
 window.mSub=function(){
-  var v=$("sdp").value.trim();if(!v)return;
-  fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"Manual",sdp:v})}).then(function(r){if(r.ok)$("sdp").value=""});
+  var v=g("sdp").value.trim();if(!v)return;
+  fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"Manual",sdp:v})}).then(function(r){if(r.ok)g("sdp").value=""});
 };
 
 fetch("/api/info").then(function(r){return r.json()}).then(function(d){
-  if(d.name)$("devname").textContent=d.name;
-  if(d.version)$("ver").textContent="v"+d.version;
-  if(d.ip)$("ip").textContent=d.ip;
+  if(d.name)g("devname").textContent=d.name;
+  if(d.version)g("ver").textContent="v"+d.version;
+  if(d.ip)g("ip").textContent=d.ip;
 }).catch(function(){});
 wsConn();
 })();

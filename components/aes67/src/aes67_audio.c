@@ -301,6 +301,8 @@ static IRAM_ATTR bool on_i2s_rx_recv(i2s_chan_handle_t handle,
                                       void *user_ctx)
 {
     if (s_capture_stream_buf && event->size > 0) {
+        /* Invalidate CPU cache: DMA wrote to memory, CPU cache may be stale */
+        esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
         BaseType_t woken = pdFALSE;
         xStreamBufferSendFromISR(s_capture_stream_buf, event->dma_buf,
                                   event->size, &woken);
@@ -573,20 +575,37 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
 
     /* Register DMA ISR callback for direct stream buffer -> DMA transfer.
      * This bypasses i2s_channel_write and the playback task entirely. */
+    /* Register TX DMA ISR (playback: stream buffer -> I2S) */
     if ((s_isr_stream_buf != NULL)) {
-        i2s_event_callbacks_t cbs = {
-            .on_recv = s_capture_stream_buf ? on_i2s_rx_recv : NULL,
+        i2s_event_callbacks_t tx_cbs = {
+            .on_recv = NULL,
             .on_recv_q_ovf = NULL,
             .on_sent = on_i2s_tx_sent_sbuf,
             .on_send_q_ovf = NULL,
         };
         esp_err_t cb_ret = i2s_channel_register_event_callback(
-            handle->tx_chan, &cbs, handle);
+            handle->tx_chan, &tx_cbs, handle);
         if (cb_ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to register DMA ISR callback: %s",
-                     esp_err_to_name(cb_ret));
+            ESP_LOGW(TAG, "Failed to register TX ISR: %s", esp_err_to_name(cb_ret));
         } else {
-            ESP_LOGI(TAG, "DMA ISR callback registered (zero-overhead playback)");
+            ESP_LOGI(TAG, "TX DMA ISR registered (playback)");
+        }
+    }
+
+    /* Register RX DMA ISR (capture: I2S -> stream buffer) */
+    if (s_capture_stream_buf != NULL) {
+        i2s_event_callbacks_t rx_cbs = {
+            .on_recv = on_i2s_rx_recv,
+            .on_recv_q_ovf = NULL,
+            .on_sent = NULL,
+            .on_send_q_ovf = NULL,
+        };
+        esp_err_t cb_ret = i2s_channel_register_event_callback(
+            handle->rx_chan, &rx_cbs, handle);
+        if (cb_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to register RX ISR: %s", esp_err_to_name(cb_ret));
+        } else {
+            ESP_LOGI(TAG, "RX DMA ISR registered (capture)");
         }
     }
 

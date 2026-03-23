@@ -198,10 +198,12 @@ void aes67_audio_slot_write(const void *data, uint32_t len)
     }
 }
 
-/* ISR callback: reads exactly event->size bytes from the stream buffer
- * to fill one DMA descriptor. With a fast source (918 pps) there's
- * always enough data. With a slow source (225 pps) some ISR fires
- * will find insufficient data and play partial silence. */
+/* Last frame for sample-hold on underrun (less audible than silence) */
+static int32_t s_last_frame[2] = {0, 0};  /* Stereo max */
+
+/* ISR callback: reads from the stream buffer to fill one DMA descriptor.
+ * On underrun, uses sample-hold (repeat last frame) instead of silence
+ * to mask the ~8% EMAC packet loss with minimal artifacts. */
 static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
                                             i2s_event_data_t *event,
                                             void *user_ctx)
@@ -216,12 +218,26 @@ static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
                                                        &woken);
         if (received >= event->size) {
             s_isr_full++;
+            /* Save last frame for sample-hold on next underrun */
+            int32_t *samples = (int32_t *)event->dma_buf;
+            uint32_t last_idx = (event->size / sizeof(int32_t)) - 2;
+            s_last_frame[0] = samples[last_idx];
+            s_last_frame[1] = samples[last_idx + 1];
         } else {
             s_isr_empty++;
-            if (received < event->size) {
-                memset((uint8_t *)event->dma_buf + received, 0,
-                       event->size - received);
+            /* Sample-hold: fill with last known frame instead of silence.
+             * Decays toward zero to avoid DC offset on stream stop. */
+            int32_t *dst = (int32_t *)event->dma_buf;
+            uint32_t n_samples = event->size / sizeof(int32_t);
+            /* Fill any partial data gap */
+            uint32_t start = received / sizeof(int32_t);
+            for (uint32_t i = start; i < n_samples; i += 2) {
+                dst[i]     = s_last_frame[0];
+                dst[i + 1] = s_last_frame[1];
             }
+            /* Decay toward zero (fade over ~10 underruns = 10ms) */
+            s_last_frame[0] = (s_last_frame[0] * 7) / 8;
+            s_last_frame[1] = (s_last_frame[1] * 7) / 8;
         }
     } else {
         s_isr_empty++;

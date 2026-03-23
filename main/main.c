@@ -162,6 +162,9 @@ static int16_t *s_hook_i16 = NULL;
 static uint32_t s_hook_pkt_count = 0;
 static uint32_t s_hook_drop_count = 0;   /* Stream buffer full drops */
 static uint32_t s_hook_fwd_count = 0;    /* Packets forwarded to lwIP (not RTP) */
+static uint16_t s_hook_last_seq = 0;     /* Last RTP sequence number */
+static uint32_t s_hook_seq_gaps = 0;     /* Sequence discontinuities */
+static uint32_t s_hook_seq_lost = 0;     /* Total lost packets (from seq gaps) */
 StreamBufferHandle_t s_hook_sbuf = NULL;  /* Global: shared with playback task */
 uint8_t s_hook_word_length = 3;          /* Default L24. Updated from SDP. */
 uint8_t s_hook_channels = 2;             /* Default stereo. Updated from SDP. */
@@ -193,6 +196,22 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
     /* RTP version must be 2 */
     int rtp_off = udp_off + 8;
     if ((buffer[rtp_off] >> 6) != 2) goto forward;
+
+    /* Track RTP sequence numbers to detect packet loss */
+    {
+        uint16_t seq = (buffer[rtp_off + 2] << 8) | buffer[rtp_off + 3];
+        if (s_hook_pkt_count > 0) {
+            uint16_t expected = s_hook_last_seq + 1;
+            if (seq != expected) {
+                int16_t gap = (int16_t)(seq - expected);
+                if (gap > 0 && gap < 100) {
+                    s_hook_seq_gaps++;
+                    s_hook_seq_lost += gap;
+                }
+            }
+        }
+        s_hook_last_seq = seq;
+    }
 
     /* Extract RTP payload */
     uint8_t cc = buffer[rtp_off] & 0x0F;
@@ -259,10 +278,13 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
 
     s_hook_pkt_count++;
     if ((s_hook_pkt_count % 5000) == 0) {
-        ESP_LOGI("eth_hook", "RTP: %lu pkts, %lu drops, %lu fwd, sb=%u",
+        ESP_LOGI("eth_hook", "RTP: %lu pkts, %lu drops, %lu fwd | "
+                 "seq: %lu gaps, %lu lost | sb=%u",
                  (unsigned long)s_hook_pkt_count,
                  (unsigned long)s_hook_drop_count,
                  (unsigned long)s_hook_fwd_count,
+                 (unsigned long)s_hook_seq_gaps,
+                 (unsigned long)s_hook_seq_lost,
                  s_hook_sbuf ? (unsigned)xStreamBufferBytesAvailable(s_hook_sbuf) : 0);
     }
 

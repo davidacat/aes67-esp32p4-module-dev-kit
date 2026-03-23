@@ -492,10 +492,29 @@ static esp_err_t handler_post_sink(httpd_req_t *req)
 
     free(body);
 
+    /* If no SDP provided, try to find it from SAP remotes by name */
+    if (!sdp || !sdp[0]) {
+        free(sdp);
+        sdp = NULL;
+        aes67_sap_handle_t sap = NULL;
+        aes67_node_get_sap(ctx->node, &sap);
+        if (sap && name[0]) {
+            int rc = aes67_sap_get_remote_count(sap);
+            for (int i = 0; i < rc; i++) {
+                aes67_sap_remote_source_t remote;
+                if (aes67_sap_get_remote(sap, i, &remote) == ESP_OK &&
+                    strcmp(remote.name, name) == 0) {
+                    sdp = strdup(remote.sdp);
+                    break;
+                }
+            }
+        }
+    }
+
     if (!name[0] || !sdp || !sdp[0]) {
         free(sdp);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "Missing 'name' or 'sdp' field");
+                            "Missing 'name' or 'sdp' field, and name not found in SAP");
         return ESP_FAIL;
     }
 
@@ -647,17 +666,23 @@ static void ws_push_task(void *arg)
                  ptp_st.grandmaster_id[4], ptp_st.grandmaster_id[5],
                  ptp_st.grandmaster_id[6], ptp_st.grandmaster_id[7]);
 
+        /* We are GM if locked with zero offset and zero path delay
+         * (slave always has non-zero offset/delay from the master) */
+        bool is_gm = (ptp_st.lock_state == AES67_PTP_LOCKED &&
+                       ptp_st.offset_ns == 0 && ptp_st.path_delay_ns == 0);
+
         /* Start building JSON */
         int pos = snprintf(buf, JSON_BUF_SIZE,
             "{"
             "\"t\":\"status\","
             "\"uptime\":%lu,"
             "\"heap_free\":%lu,"
-            "\"ptp\":{\"lock\":\"%s\",\"gm\":\"%s\",\"offset\":%ld,\"jitter\":%ld,\"delay\":%ld},",
+            "\"ptp\":{\"lock\":\"%s\",\"gm\":\"%s\",\"is_gm\":%s,\"offset\":%ld,\"jitter\":%ld,\"delay\":%ld},",
             (unsigned long)uptime_s,
             (unsigned long)heap_free,
             ptp_lock_str(ptp_st.lock_state),
             gm_str,
+            is_gm ? "true" : "false",
             (long)ptp_st.offset_ns,
             (long)ptp_st.jitter_ns,
             (long)ptp_st.path_delay_ns);

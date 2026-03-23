@@ -36,10 +36,17 @@ header .meta{font-size:11px;color:#888;text-align:right}
 .ep textarea{min-height:50px;font-size:10px;line-height:1.3;resize:vertical}
 .hdr{display:flex;justify-content:space-between;align-items:center}
 footer{border-top:1px solid #333;padding:8px 0;font-size:11px;color:#666;display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;margin-top:8px}
+#overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:99;justify-content:center;align-items:center}
+#overlay.show{display:flex}
+#overlay .box{background:#1a1a1a;border:1px solid #e8a030;border-radius:6px;padding:20px 30px;text-align:center;font-size:13px;color:#ccc}
+#overlay .box .dot{width:10px;height:10px;margin:0 auto 10px}
+.tag{font-size:9px;padding:1px 5px;border-radius:2px;margin-left:6px;vertical-align:middle;color:#111;font-weight:600}
+.tag-gm{background:#e8a030}.tag-slave{background:#4a4}
 @media(max-width:700px){.grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
+<div id="overlay"><div class="box"><span class="dot da"></span><div id="ol-msg">Connecting...</div></div></div>
 <div class="wrap">
 <header>
 <h1 id="devname">AES67 Node</h1>
@@ -48,7 +55,7 @@ footer{border-top:1px solid #333;padding:8px 0;font-size:11px;color:#666;display
 <div class="card">
 <h2>PTP Status</h2>
 <div class="row">
-<span><span class="dot dr" id="pd"></span><span id="pl">--</span></span>
+<span><span class="dot dr" id="pd"></span><span id="pl">--</span><span class="tag" id="pt" style="display:none"></span></span>
 <span><span class="lbl">GM </span><span class="val" id="pg">--</span></span>
 <span><span class="lbl">Offset </span><span class="val" id="po">--</span><span class="lbl"> ns</span></span>
 <span><span class="lbl">Jitter </span><span class="val" id="pj">--</span><span class="lbl"> ns</span></span>
@@ -125,8 +132,19 @@ function mkSlots(container,prefix,isSink){
   }
 }
 
-mkSlots(g("sc"),"src",false);
-mkSlots(g("sk"),"sink",true);
+/* Init after DOM ready (gzip delivery may race with parser) */
+function init(){
+  mkSlots(g("sc"),"src",false);
+  mkSlots(g("sk"),"sink",true);
+  fetch("/api/info").then(function(r){return r.json()}).then(function(d){
+    if(d.name)g("devname").textContent=d.name;
+    if(d.version)g("ver").textContent="v"+d.version;
+    if(d.ip)g("ip").textContent=d.ip;
+  }).catch(function(){});
+  wsConn();
+}
+if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",init);
+else init();
 
 function updateSlots(prefix,arr){
   var ids={},i;
@@ -177,6 +195,10 @@ function onMsg(e){
   g("pd").className="dot "+dc(p.lock);
   g("pl").textContent=p.lock||"Unknown";
   g("pg").textContent=p.gm||"--";
+  var pt=g("pt");
+  if(p.is_gm){pt.textContent="GRANDMASTER";pt.className="tag tag-gm";pt.style.display=""}
+  else if(p.lock==="locked"){pt.textContent="SLAVE";pt.className="tag tag-slave";pt.style.display=""}
+  else{pt.style.display="none"}
   g("po").textContent=fmt(p.offset);
   g("pj").textContent=fmt(p.jitter);
   g("py").textContent=fmt(p.delay);
@@ -192,11 +214,22 @@ function onMsg(e){
   g("fl").textContent=fmt(eth.lost);
 }
 
+var backoff=1000;
+function showOl(msg){var o=g("overlay");o.classList.add("show");g("ol-msg").textContent=msg}
+function hideOl(){g("overlay").classList.remove("show")}
+
 function wsConn(){
+  showOl("Connecting...");
   var l=location;
   ws=new WebSocket((l.protocol==="https:"?"wss://":"ws://")+l.host+"/ws");
+  ws.onopen=function(){backoff=1000;hideOl()};
   ws.onmessage=onMsg;
-  ws.onclose=function(){rto=setTimeout(wsConn,2000)};
+  ws.onclose=function(){
+    var sec=Math.round(backoff/1000);
+    showOl("Disconnected. Retrying in "+sec+"s...");
+    rto=setTimeout(wsConn,backoff);
+    backoff=Math.min(backoff*1.5,10000);
+  };
   ws.onerror=function(){ws.close()};
 }
 
@@ -216,12 +249,6 @@ window.mSub=function(){
   fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"Manual",sdp:v})}).then(function(r){if(r.ok)g("sdp").value=""});
 };
 
-fetch("/api/info").then(function(r){return r.json()}).then(function(d){
-  if(d.name)g("devname").textContent=d.name;
-  if(d.version)g("ver").textContent="v"+d.version;
-  if(d.ip)g("ip").textContent=d.ip;
-}).catch(function(){});
-wsConn();
 })();
 </script>
 </body>

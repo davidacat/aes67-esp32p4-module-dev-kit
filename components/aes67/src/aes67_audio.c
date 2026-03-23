@@ -183,6 +183,15 @@ static volatile uint32_t s_isr_full = 0;     /* ISR got a full descriptor of dat
 static volatile uint32_t s_isr_partial = 0;  /* ISR got some data but not full descriptor */
 static volatile uint32_t s_isr_empty = 0;    /* ISR got zero bytes (silence) */
 
+/* Pre-buffer threshold: wait until this many bytes are in the stream
+ * buffer before the ISR starts consuming. This absorbs the phase
+ * jitter between packet arrival (network-timed) and ISR firing
+ * (APLL-timed). Without pre-buffering, the ISR and packets are two
+ * independent 250Hz clocks that drift in and out of phase, causing
+ * ~10% of ISR fires to find the buffer empty. */
+#define ISR_PREFILL_BYTES   (1536 * 3)  /* 3 packets = 12ms headroom */
+static volatile bool s_isr_prefilled = false;
+
 /* ISR callback: fires when a DMA descriptor finishes playing (every 4ms).
  * Reads int32 audio data directly from the stream buffer into the DMA
  * descriptor. If no data is available, writes silence. */
@@ -193,27 +202,46 @@ static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
     BaseType_t woken = pdFALSE;
     s_isr_fires++;
 
-    if (s_isr_stream_buf) {
-        size_t received = xStreamBufferReceiveFromISR(s_isr_stream_buf,
-                                                       event->dma_buf,
-                                                       event->size,
-                                                       &woken);
-        if (received >= event->size) {
-            s_isr_full++;
-        } else if (received > 0) {
-            s_isr_partial++;
-            memset((uint8_t *)event->dma_buf + received, 0,
-                   event->size - received);
-        } else {
+    if (!s_isr_stream_buf) {
+        s_isr_empty++;
+        memset(event->dma_buf, 0, event->size);
+        esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        return false;
+    }
+
+    /* Wait for pre-buffer to fill before starting consumption.
+     * This gives 12ms of headroom so the ISR always finds data
+     * even when packet arrival and ISR firing are out of phase. */
+    if (!s_isr_prefilled) {
+        size_t avail = xStreamBufferBytesAvailable(s_isr_stream_buf);
+        if (avail < ISR_PREFILL_BYTES) {
             s_isr_empty++;
             memset(event->dma_buf, 0, event->size);
+            esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+            return false;
         }
+        s_isr_prefilled = true;
+    }
+
+    size_t received = xStreamBufferReceiveFromISR(s_isr_stream_buf,
+                                                   event->dma_buf,
+                                                   event->size,
+                                                   &woken);
+    if (received >= event->size) {
+        s_isr_full++;
+    } else if (received > 0) {
+        s_isr_partial++;
+        memset((uint8_t *)event->dma_buf + received, 0,
+               event->size - received);
+        /* Buffer underrun after prefill: reset and re-prefill */
+        s_isr_prefilled = false;
     } else {
         s_isr_empty++;
         memset(event->dma_buf, 0, event->size);
+        s_isr_prefilled = false;  /* Re-prefill on next data */
     }
 
-    /* Flush CPU cache so DMA sees the new data (ESP32-P4 L1 cache) */
+    /* Flush CPU cache so DMA sees the new data */
     esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
     return woken == pdTRUE;
@@ -231,10 +259,13 @@ void aes67_audio_log_isr_stats(void)
     s_isr_partial = 0;
     s_isr_empty = 0;
     if (fires > 0) {
-        ESP_LOGI("dma_isr", "fires=%lu full=%lu partial=%lu empty=%lu (%lu%% util)",
+        size_t sb_bytes = s_isr_stream_buf ?
+                          xStreamBufferBytesAvailable(s_isr_stream_buf) : 0;
+        ESP_LOGI("dma_isr", "fires=%lu full=%lu partial=%lu empty=%lu (%lu%%) sb=%u",
                  (unsigned long)fires, (unsigned long)full,
                  (unsigned long)partial, (unsigned long)empty,
-                 (unsigned long)(full * 100 / fires));
+                 (unsigned long)(full * 100 / fires),
+                 (unsigned)sb_bytes);
     }
 }
 

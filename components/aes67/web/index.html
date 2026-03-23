@@ -98,7 +98,13 @@ function fmtUp(s){
 }
 function esc(s){return s?String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"):""}
 function dc(l){return l==="locked"?"dg":l==="locking"||l==="acquiring"?"da":"dr"}
-function fc(s){return(s.codec||"?")+" / "+(s.rate?fmt(s.rate)+"Hz":"?")+" / "+(s.ch||"?")+"ch / "+((s.ptime||0)/1000).toFixed(1)+"ms"}
+function fmtTime(us){
+  if(!us)return"0";
+  if(us>=1000000)return(us/1000000).toFixed(1)+"s";
+  if(us>=1000){var ms=us/1000;return(ms%1?ms.toFixed(3).replace(/0+$/,''):ms.toFixed(0))+"ms"}
+  return us+"\u00b5s";
+}
+function fc(s){return(s.codec||"?")+" / "+(s.rate?fmt(s.rate)+"Hz":"?")+" / "+(s.ch||"?")+"ch / "+fmtTime(s.ptime)}
 
 /* Build all slot DOM once at init. Source slots and sink slots share structure
    but sinks get edit panel + delete button. IDs follow the spec:
@@ -183,7 +189,7 @@ function renderRemotes(arr){
   var h="";
   for(var i=0;i<arr.length;i++){
     var r=arr[i];
-    var info=r.codec?(esc(r.codec)+' / '+fmt(r.rate)+'Hz / '+r.ch+'ch / '+((r.ptime||0)/1000).toFixed(1)+'ms'):'';
+    var info=r.codec?(esc(r.codec)+' / '+fmt(r.rate)+'Hz / '+r.ch+'ch / '+fmtTime(r.ptime)):'';
     h+='<div class="re"><span>'+esc(r.name)+' <span class="lbl">('+esc(r.origin)+')</span>'+(info?' <span class="lbl">'+info+'</span>':'')+'</span><button class="btn" onclick="sR(\''+esc(r.origin)+"','"+esc(r.name)+'\')">Subscribe</button></div>';
   }
   c.innerHTML=h;

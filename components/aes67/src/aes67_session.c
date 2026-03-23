@@ -566,6 +566,14 @@ int aes67_session_get_sink_count(aes67_session_handle_t handle)
     return count;
 }
 
+void aes67_session_set_packet_time(aes67_session_handle_t handle, uint16_t ptime_us)
+{
+    if (handle && ptime_us > 0) {
+        struct aes67_session_mgr *mgr = handle;
+        mgr->config.audio.packet_time_us = ptime_us;
+    }
+}
+
 esp_err_t aes67_session_destroy(aes67_session_handle_t handle)
 {
     if (!handle) {

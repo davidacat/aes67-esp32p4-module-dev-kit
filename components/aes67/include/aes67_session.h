@@ -121,6 +121,11 @@ int aes67_session_get_source_count(aes67_session_handle_t handle);
 int aes67_session_get_sink_count(aes67_session_handle_t handle);
 
 /**
+ * Set the packet time for new source streams (does not affect existing).
+ */
+void aes67_session_set_packet_time(aes67_session_handle_t handle, uint16_t ptime_us);
+
+/**
  * Destroy session manager and all streams.
  */
 esp_err_t aes67_session_destroy(aes67_session_handle_t handle);

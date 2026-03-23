@@ -78,16 +78,17 @@ static void sap_discovery_cb(bool is_announce,
                      (unsigned long)sink.rtp_config.sample_rate,
                      sink.rtp_config.packet_time_us);
 
-            /* Create a matching source stream with same codec/rate/channels
-             * as the discovered sink, so both directions are symmetric. */
-            aes67_codec_t src_codec = sink.rtp_config.codec;
-            uint8_t src_ch = sink.rtp_config.channels;
+            /* Create a matching source with same codec/channels/ptime */
+            aes67_session_set_packet_time(s_session, sink.rtp_config.packet_time_us);
             uint8_t src_id = 0;
             esp_err_t src_err = aes67_session_add_source(
-                s_session, "ESP32-P4 AES67", src_ch, src_codec, &src_id);
+                s_session, "ESP32-P4 AES67",
+                sink.rtp_config.channels, sink.rtp_config.codec, &src_id);
             if (src_err == ESP_OK) {
-                ESP_LOGI("main", "Source matched to sink: %uch %s",
-                         src_ch, aes67_codec_to_str(src_codec));
+                ESP_LOGI("main", "Source matched to sink: %uch %s %uus",
+                         sink.rtp_config.channels,
+                         aes67_codec_to_str(sink.rtp_config.codec),
+                         sink.rtp_config.packet_time_us);
             }
         }
         ESP_LOGI("main", "Sink added (id=%u) -- receiving \"%s\"",

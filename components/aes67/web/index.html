@@ -17,19 +17,24 @@ header .meta{font-size:11px;color:#888;text-align:right}
 .row{display:flex;flex-wrap:wrap;gap:6px 18px}
 .row span{white-space:nowrap}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.stream{background:#222;border:1px solid #2a2a2a;border-radius:3px;padding:8px 10px;margin-bottom:6px}
-.stream .sname{color:#e8a030;font-weight:600;font-size:12px}
-.stream .sinfo{font-size:11px;color:#999;margin-top:3px}
+.st{background:#222;border:1px solid #2a2a2a;border-radius:3px;padding:8px 10px;margin-bottom:6px;display:none}
+.st .sn{color:#e8a030;font-weight:600;font-size:12px}
+.st .si{font-size:11px;color:#999;margin-top:3px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
-.dot-g{background:#4a4}.dot-a{background:#e8a030}.dot-r{background:#c44}
+.dg{background:#4a4}.da{background:#e8a030}.dr{background:#c44}
 .lbl{color:#666;font-size:11px}
 .val{color:#ddd}
-#remotes-list .rentry{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #222}
-#remotes-list .rentry:last-child{border:none}
+#rl .re{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #222}
+#rl .re:last-child{border:none}
 .btn{background:#e8a030;color:#111;border:none;padding:3px 10px;border-radius:3px;font:11px/1.4 inherit;cursor:pointer}
 .btn:hover{background:#f0b040}
-.msub{display:flex;gap:8px;margin-top:6px;align-items:flex-start}
-.msub textarea{flex:1;background:#222;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:3px;font:11px/1.4 inherit;resize:vertical;min-height:60px}
+.bd{background:#c44}.bd:hover{background:#d55}
+.ms{display:flex;gap:8px;margin-top:6px;align-items:flex-start}
+.ms textarea{flex:1;background:#222;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:3px;font:11px/1.4 inherit;resize:vertical;min-height:60px}
+.ep{display:none;margin-top:6px;padding-top:6px;border-top:1px solid #333}
+.ep input,.ep textarea{width:100%;background:#1a1a1a;border:1px solid #333;color:#ccc;padding:3px 6px;margin:2px 0 4px;font:11px inherit}
+.ep textarea{min-height:50px;font-size:10px;line-height:1.3;resize:vertical}
+.hdr{display:flex;justify-content:space-between;align-items:center}
 footer{border-top:1px solid #333;padding:8px 0;font-size:11px;color:#666;display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;margin-top:8px}
 @media(max-width:700px){.grid{grid-template-columns:1fr}}
 </style>
@@ -40,184 +45,184 @@ footer{border-top:1px solid #333;padding:8px 0;font-size:11px;color:#666;display
 <h1 id="devname">AES67 Node</h1>
 <div class="meta"><span id="ver">--</span><br><span id="ip">--</span></div>
 </header>
-
-<div class="card" id="ptp-card">
+<div class="card">
 <h2>PTP Status</h2>
 <div class="row">
-<span><span class="dot dot-r" id="ptp-dot"></span><span id="ptp-lock">--</span></span>
-<span><span class="lbl">GM </span><span class="val" id="ptp-gm">--</span></span>
-<span><span class="lbl">Offset </span><span class="val" id="ptp-off">--</span><span class="lbl"> ns</span></span>
-<span><span class="lbl">Jitter </span><span class="val" id="ptp-jit">--</span><span class="lbl"> ns</span></span>
-<span><span class="lbl">Delay </span><span class="val" id="ptp-del">--</span><span class="lbl"> ns</span></span>
+<span><span class="dot dr" id="pd"></span><span id="pl">--</span></span>
+<span><span class="lbl">GM </span><span class="val" id="pg">--</span></span>
+<span><span class="lbl">Offset </span><span class="val" id="po">--</span><span class="lbl"> ns</span></span>
+<span><span class="lbl">Jitter </span><span class="val" id="pj">--</span><span class="lbl"> ns</span></span>
+<span><span class="lbl">Delay </span><span class="val" id="py">--</span><span class="lbl"> ns</span></span>
 </div>
 </div>
-
 <div class="grid">
-<div class="card"><h2>Sources (TX)</h2><div id="sources">--</div></div>
-<div class="card"><h2>Sinks (RX)</h2><div id="sinks">--</div></div>
+<div class="card"><h2>Sources (TX)</h2><div id="sc"></div></div>
+<div class="card"><h2>Sinks (RX)</h2><div id="sk"></div></div>
 </div>
-
 <div class="card">
 <h2>Network Discovery</h2>
-<div id="remotes-list"><span class="lbl">No remote sources discovered</span></div>
+<div id="rl"><span class="lbl">No remote sources discovered</span></div>
 </div>
-
 <div class="card">
 <h2>Manual Subscribe</h2>
-<div class="msub">
-<textarea id="sdp-in" placeholder="Paste SDP text here&#10;v=0&#10;o=- ..."></textarea>
-<button class="btn" onclick="manualSub()">Subscribe</button>
+<div class="ms">
+<textarea id="sdp" placeholder="Paste SDP text here&#10;v=0&#10;o=- ..."></textarea>
+<button class="btn" onclick="mSub()">Subscribe</button>
 </div>
 </div>
-
 <footer>
-<span>Uptime: <span id="ft-up">--</span></span>
-<span>Heap: <span id="ft-heap">--</span></span>
-<span>RTP: <span id="ft-rtp">--</span> pps</span>
-<span>Pkts: <span id="ft-tot">--</span></span>
-<span>Lost: <span id="ft-lost">--</span></span>
+<span>Uptime: <span id="fu">--</span></span>
+<span>Heap: <span id="fh">--</span></span>
+<span>RTP: <span id="fr">--</span> pps</span>
+<span>Pkts: <span id="ft">--</span></span>
+<span>Lost: <span id="fl">--</span></span>
 </footer>
 </div>
-
 <script>
-var ws,rto;
-var PTP_STATES=["No clock","Listening","Locked","Acquiring"];
+(function(){
+var N=4,ws,rto,lRtp=0,lT=0;
+var $=document.getElementById.bind(document);
 
 function fmt(n){return n!=null?Number(n).toLocaleString():"--"}
-
 function fmtUp(s){
   if(s==null)return"--";
-  var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),sec=s%60;
-  return(d?d+"d ":"")+h+"h "+m+"m "+sec+"s";
+  var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),r=s%60,p=[];
+  if(d)p.push(d+"d");p.push(h+"h");p.push(m+"m");p.push(r+"s");return p.join(" ");
 }
+function esc(s){return s?String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"):""}
+function dc(l){return l==="locked"?"dg":l==="locking"||l==="acquiring"?"da":"dr"}
+function fc(s){return(s.codec||"?")+" / "+(s.rate?fmt(s.rate)+"Hz":"?")+" / "+(s.ch||"?")+"ch / "+((s.ptime||0)/1000).toFixed(1)+"ms"}
 
-function el(id){return document.getElementById(id)}
-
-function dotClass(lock){return lock==="locked"?"dot-g":lock==="locking"||lock==="acquiring"?"dot-a":"dot-r"}
-
-function renderStreams(arr,isSink){
-  if(!arr||!arr.length)return'<span class="lbl">None</span>';
-  var h="";
-  for(var i=0;i<arr.length;i++){
-    var s=arr[i];
-    var on=isSink?s.active:true;
-    h+='<div class="stream"><div style="display:flex;justify-content:space-between;align-items:center">';
-    h+='<span class="sname">'+(on?'<span class="dot dot-g"></span>':'<span class="dot dot-r"></span>')+esc(s.name)+'</span>';
-    h+='<span>';
+/* Build all slot DOM once at init. Source slots and sink slots share structure
+   but sinks get edit panel + delete button. IDs follow the spec:
+   src-0-name, src-0-codec, src-0-tx, sink-0-name, sink-0-rx, sink-0-lost, etc. */
+function mkSlots(container,prefix,isSink){
+  var none=document.createElement("span");
+  none.className="lbl";none.id=prefix+"-none";
+  none.textContent=isSink?"No active sinks":"No active sources";
+  container.appendChild(none);
+  for(var i=0;i<N;i++){
+    var d=document.createElement("div");
+    d.className="st";d.id=prefix+"-slot-"+i;d.setAttribute("data-stream-id",String(i));
+    var hdr='<div class="hdr"><span class="sn"><span class="dot dr" id="'+prefix+"-"+i+'-dot"></span><span id="'+prefix+"-"+i+'-name">--</span></span><span>';
     if(isSink){
-      h+='<button class="btn" style="font-size:10px;padding:1px 6px;margin-right:4px" onclick="toggleEdit(\'sink\','+s.id+')">edit</button>';
-      h+='<button class="btn" style="background:#c44;font-size:10px;padding:1px 6px" onclick="delSink('+s.id+')">x</button>';
-    } else {
-      h+='<button class="btn" style="font-size:10px;padding:1px 6px" onclick="toggleEdit(\'src\','+s.id+')">info</button>';
+      hdr+='<button class="btn" style="font-size:10px;padding:1px 6px;margin-right:4px" onclick="TE(\''+prefix+"',"+i+')">edit</button>';
+      hdr+='<button class="btn bd" style="font-size:10px;padding:1px 6px" onclick="dS('+i+')">x</button>';
+    }else{
+      hdr+='<button class="btn" style="font-size:10px;padding:1px 6px" onclick="TE(\''+prefix+"',"+i+')">info</button>';
     }
-    h+='</span></div>';
-    h+='<div class="sinfo">'+(s.codec||"?")+' / '+(s.rate?fmt(s.rate)+"Hz":"?")+' / '+(s.ch||"?")+'ch / '+((s.ptime||0)/1000).toFixed(1)+'ms</div>';
-    h+='<div class="sinfo">'+(isSink?"RX":"TX")+": "+fmt(isSink?s.rx:s.tx)+" pkts";
-    if(isSink)h+=" | Lost: "+fmt(s.lost)+" | Jitter: "+fmt(s.jitter)+"\u00b5s";
-    h+="</div>";
-    h+='<div id="edit-'+(isSink?"sink":"src")+'-'+s.id+'" style="display:none;margin-top:6px;padding-top:6px;border-top:1px solid #333">';
+    hdr+='</span></div>';
+    hdr+='<div class="si" id="'+prefix+"-"+i+'-codec">--</div>';
     if(isSink){
-      h+='<div class="lbl">Name:</div><input style="width:100%;background:#1a1a1a;border:1px solid #333;color:#ccc;padding:3px 6px;margin:2px 0 4px;font:11px inherit" id="edit-sink-name-'+s.id+'" value="'+esc(s.name)+'">';
-      h+='<div class="lbl">SDP (paste to re-subscribe):</div><textarea style="width:100%;min-height:50px;background:#1a1a1a;border:1px solid #333;color:#ccc;padding:3px 6px;margin:2px 0 4px;font:10px/1.3 inherit;resize:vertical" id="edit-sink-sdp-'+s.id+'" placeholder="Paste SDP to re-subscribe..."></textarea>';
-      h+='<button class="btn" onclick="resubSink('+s.id+')">Re-subscribe</button>';
-    } else {
-      h+='<div class="lbl">Source ID: '+s.id+'</div>';
+      hdr+='<div class="si">RX: <span id="sink-'+i+'-rx">--</span> pkts | Lost: <span id="sink-'+i+'-lost">--</span> | Jitter: <span id="sink-'+i+'-jitter">--</span> us</div>';
+      hdr+='<div class="ep" id="edit-sink-'+i+'"><div class="lbl">Name:</div><input id="edit-sink-name-'+i+'" value=""><div class="lbl">SDP (paste to re-subscribe):</div><textarea id="edit-sink-sdp-'+i+'" placeholder="Paste SDP..."></textarea><button class="btn" onclick="rS('+i+')">Re-subscribe</button></div>';
+    }else{
+      hdr+='<div class="si">TX: <span id="src-'+i+'-tx">--</span> pkts</div>';
+      hdr+='<div class="ep" id="edit-src-'+i+'"><div class="lbl">Source ID: '+i+'</div></div>';
     }
-    h+='</div></div>';
+    d.innerHTML=hdr;
+    container.appendChild(d);
   }
-  return h;
 }
 
-function toggleEdit(type,id){
-  var e=document.getElementById("edit-"+type+"-"+id);
-  if(e)e.style.display=e.style.display==="none"?"block":"none";
-}
+mkSlots($("sc"),"src",false);
+mkSlots($("sk"),"sink",true);
 
-function resubSink(id){
-  var name=document.getElementById("edit-sink-name-"+id);
-  var sdp=document.getElementById("edit-sink-sdp-"+id);
-  if(!sdp||!sdp.value.trim()){alert("Paste SDP text to re-subscribe");return}
-  fetch("/api/sinks/"+id,{method:"DELETE"}).then(function(){
-    return fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({name:name?name.value:"Sink",sdp:sdp.value})});
-  });
+function updateSlots(prefix,arr){
+  var ids={},i;
+  if(arr)for(i=0;i<arr.length;i++)ids[arr[i].id]=arr[i];
+  var any=false;
+  for(i=0;i<N;i++){
+    var slot=$(prefix+"-slot-"+i),data=ids[i];
+    if(data){
+      any=true;
+      slot.style.display="";
+      var on=prefix==="src"?true:data.active;
+      $(prefix+"-"+i+"-dot").className="dot "+(on?"dg":"dr");
+      $(prefix+"-"+i+"-name").textContent=data.name||"--";
+      $(prefix+"-"+i+"-codec").textContent=fc(data);
+      if(prefix==="src"){
+        $("src-"+i+"-tx").textContent=fmt(data.tx);
+      }else{
+        $("sink-"+i+"-rx").textContent=fmt(data.rx);
+        $("sink-"+i+"-lost").textContent=fmt(data.lost);
+        $("sink-"+i+"-jitter").textContent=fmt(data.jitter);
+        var ni=$("edit-sink-name-"+i);
+        if(ni&&document.activeElement!==ni)ni.value=data.name||"";
+      }
+    }else{
+      slot.style.display="none";
+      var ep=$("edit-"+prefix+"-"+i);
+      if(ep)ep.style.display="none";
+    }
+  }
+  $(prefix+"-none").style.display=any?"none":"";
 }
 
 function renderRemotes(arr){
-  if(!arr||!arr.length){el("remotes-list").innerHTML='<span class="lbl">No remote sources discovered</span>';return}
+  var c=$("rl");
+  if(!arr||!arr.length){c.innerHTML='<span class="lbl">No remote sources discovered</span>';return}
   var h="";
   for(var i=0;i<arr.length;i++){
     var r=arr[i];
-    h+='<div class="rentry"><span>'+esc(r.name)+' <span class="lbl">('+esc(r.origin)+')</span></span>'+
-      '<button class="btn" onclick="subRemote(\''+esc(r.origin)+'\',\''+esc(r.name)+'\')">Subscribe</button></div>';
+    h+='<div class="re"><span>'+esc(r.name)+' <span class="lbl">('+esc(r.origin)+')</span></span><button class="btn" onclick="sR(\''+esc(r.origin)+"','"+esc(r.name)+'\')">Subscribe</button></div>';
   }
-  el("remotes-list").innerHTML=h;
+  c.innerHTML=h;
 }
 
-function esc(s){return s?String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"):""}
-
-var lastRtp=0,lastTime=0;
 function onMsg(e){
   var d;try{d=JSON.parse(e.data)}catch(x){return}
   if(d.t!=="status")return;
-  /* PTP */
   var p=d.ptp||{};
-  el("ptp-dot").className="dot "+dotClass(p.lock);
-  el("ptp-lock").textContent=p.lock||"Unknown";
-  el("ptp-gm").textContent=p.gm||"--";
-  el("ptp-off").textContent=fmt(p.offset);
-  el("ptp-jit").textContent=fmt(p.jitter);
-  el("ptp-del").textContent=fmt(p.delay);
-  /* Streams */
-  el("sources").innerHTML=renderStreams(d.sources,false);
-  el("sinks").innerHTML=renderStreams(d.sinks,true);
-  /* Remotes */
+  $("pd").className="dot "+dc(p.lock);
+  $("pl").textContent=p.lock||"Unknown";
+  $("pg").textContent=p.gm||"--";
+  $("po").textContent=fmt(p.offset);
+  $("pj").textContent=fmt(p.jitter);
+  $("py").textContent=fmt(p.delay);
+  updateSlots("src",d.sources);
+  updateSlots("sink",d.sinks);
   renderRemotes(d.sap_remotes);
-  /* Footer with computed pps */
-  el("ft-up").textContent=fmtUp(d.uptime);
-  el("ft-heap").textContent=fmt(d.heap_free)+" B";
-  var eth=d.eth||{};
-  var now=Date.now();
-  if(lastTime>0&&eth.rtp>0){
-    var dt=(now-lastTime)/1000;
-    if(dt>0)el("ft-rtp").textContent=fmt(Math.round((eth.rtp-lastRtp)/dt));
-  }
-  lastRtp=eth.rtp||0;lastTime=now;
-  el("ft-tot").textContent=fmt(eth.total);
-  el("ft-lost").textContent=fmt(eth.lost);
+  $("fu").textContent=fmtUp(d.uptime);
+  $("fh").textContent=fmt(d.heap_free)+" B";
+  var eth=d.eth||{},now=Date.now();
+  if(lT>0&&eth.rtp!=null){var dt=(now-lT)/1000;if(dt>0.1)$("fr").textContent=fmt(Math.round((eth.rtp-lRtp)/dt))}
+  lRtp=eth.rtp||0;lT=now;
+  $("ft").textContent=fmt(eth.total);
+  $("fl").textContent=fmt(eth.lost);
 }
 
-function wsConnect(){
-  var loc=location;
-  ws=new WebSocket((loc.protocol==="https:"?"wss://":"ws://")+loc.host+"/ws");
+function wsConn(){
+  var l=location;
+  ws=new WebSocket((l.protocol==="https:"?"wss://":"ws://")+l.host+"/ws");
   ws.onmessage=onMsg;
-  ws.onclose=function(){rto=setTimeout(wsConnect,2000)};
+  ws.onclose=function(){rto=setTimeout(wsConn,2000)};
   ws.onerror=function(){ws.close()};
 }
 
-function subRemote(origin,name){
-  fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({name:name,origin:origin})});
-}
+/* Globals for onclick handlers */
+window.TE=function(t,id){var e=$("edit-"+t+"-"+id);if(e)e.style.display=(!e.style.display||e.style.display==="none")?"block":"none"};
+window.rS=function(id){
+  var n=$("edit-sink-name-"+id),s=$("edit-sink-sdp-"+id);
+  if(!s||!s.value.trim()){alert("Paste SDP text to re-subscribe");return}
+  fetch("/api/sinks/"+id,{method:"DELETE"}).then(function(){
+    return fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n?n.value:"Sink",sdp:s.value})});
+  });
+};
+window.sR=function(o,n){fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,origin:o})})};
+window.dS=function(id){fetch("/api/sinks/"+id,{method:"DELETE"})};
+window.mSub=function(){
+  var v=$("sdp").value.trim();if(!v)return;
+  fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"Manual",sdp:v})}).then(function(r){if(r.ok)$("sdp").value=""});
+};
 
-function delSink(id){
-  fetch("/api/sinks/"+id,{method:"DELETE"});
-}
-
-function manualSub(){
-  var v=el("sdp-in").value.trim();
-  if(!v)return;
-  fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({name:"Manual",sdp:v})}).then(function(r){if(r.ok)el("sdp-in").value=""});
-}
-
-/* Init: fetch device info then open WS */
 fetch("/api/info").then(function(r){return r.json()}).then(function(d){
-  if(d.name)el("devname").textContent=d.name;
-  if(d.version)el("ver").textContent="v"+d.version;
-  if(d.ip)el("ip").textContent=d.ip;
+  if(d.name)$("devname").textContent=d.name;
+  if(d.version)$("ver").textContent="v"+d.version;
+  if(d.ip)$("ip").textContent=d.ip;
 }).catch(function(){});
-wsConnect();
+wsConn();
+})();
 </script>
 </body>
 </html>

@@ -213,22 +213,42 @@ static void playback_task(void *arg)
         }
 
         /* DMA-paced playback with auto_clear=false:
-         * 1. Write previous data to I2S (BLOCKS until DMA frees descriptor)
+         * 1. Write previous data to output (BLOCKS until DMA frees descriptor)
          * 2. During the block, raw callback fills stream buffer
          * 3. Read new data from stream buffer (should be ready instantly)
-         * 4. Loop to step 1 with the new data
-         *
-         * The i2s_channel_write blocking IS the sample-rate pacing mechanism.
-         * With auto_clear=false, if we don't write, DMA replays old audio. */
+         * 4. Loop to step 1 with the new data */
         const uint32_t pkt_bytes = pkt_native_bytes;
         uint32_t frames = spp;
 
-        i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
-
-        if (have_prev && tx) {
-            size_t written = 0;
-            i2s_channel_write(tx, prev_buf, pkt_bytes,
-                              &written, portMAX_DELAY);
+        /* Output routing based on config output_mode */
+        if (have_prev) {
+            switch (node->config.output_mode) {
+            case AES67_OUTPUT_I2S: {
+                i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
+                if (tx) {
+                    size_t written = 0;
+                    i2s_channel_write(tx, prev_buf, pkt_bytes,
+                                      &written, portMAX_DELAY);
+                }
+                break;
+            }
+            case AES67_OUTPUT_CALLBACK:
+                if (node->config.audio_cb) {
+                    node->config.audio_cb(prev_buf, frames, ch,
+                                          params.word_length,
+                                          params.sample_rate,
+                                          node->config.audio_cb_user_data);
+                }
+                /* Pace at packet rate to avoid spinning */
+                vTaskDelay(pdMS_TO_TICKS(1));
+                break;
+            case AES67_OUTPUT_STREAM_BUFFER:
+                /* App reads from the same stream buffer we read from.
+                 * In this mode, we don't consume -- just pass through.
+                 * The stream buffer IS the output. Skip writing. */
+                vTaskDelay(pdMS_TO_TICKS(1));
+                break;
+            }
         }
 
         size_t avail = xStreamBufferBytesAvailable(sbuf);
@@ -240,9 +260,6 @@ static void playback_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
-        /* If no new data but have_prev: prev_buf stays unchanged,
-         * next write will replay it. DMA also replays old descriptors
-         * with auto_clear=false, so the output is smooth. */
 
         total_frames += frames;
         write_count++;

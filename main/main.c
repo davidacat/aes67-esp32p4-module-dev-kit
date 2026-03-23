@@ -276,18 +276,10 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
                       frames * ch * (int)sizeof(int32_t));
     }
 
-    /* Convert to int32 */
+    /* Convert to int32 -- stereo passthrough, no mono mix */
     aes67_convert_from_net(payload, s_hook_tmp32, frames, ch, wl);
 
-    /* For mono speaker: duplicate left channel to all output slots */
-    for (int i = 0; i < frames; i++) {
-        int32_t left = s_hook_tmp32[i * ch];
-        for (int c = 0; c < ch; c++) {
-            s_hook_tmp32[i * ch + c] = left;
-        }
-    }
-
-    /* Write int32 to the slot ring (read by DMA ISR) */
+    /* Write int32 stereo directly to stream buffer (read by DMA ISR) */
     extern void aes67_audio_slot_write(const void *data, uint32_t len);
     aes67_audio_slot_write(s_hook_tmp32, frames * ch * sizeof(int32_t));
 

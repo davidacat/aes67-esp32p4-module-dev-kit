@@ -29,6 +29,7 @@
 
 #include <string.h>
 #include "aes67.h"
+#include "aes67_config.h"
 #include "aes67_convert.h"
 #include "aes67_session.h"
 #include "aes67_rtp.h"
@@ -45,8 +46,9 @@
 static aes67_session_handle_t s_session = NULL;
 static bool s_sink_added = false;
 
-/* Word length for the Ethernet RTP hook (set from SDP when sink added) */
+/* Stream params for the Ethernet RTP hook (set from SDP when sink added) */
 extern uint8_t s_hook_word_length;
+extern uint8_t s_hook_channels;
 
 /* SAP discovery callback: auto-subscribe to discovered remote sources */
 static void sap_discovery_cb(bool is_announce,
@@ -66,11 +68,12 @@ static void sap_discovery_cb(bool is_announce,
                                             source->sdp, &sink_id);
     if (err == ESP_OK) {
         s_sink_added = true;
-        /* Update Ethernet hook word length from the SDP */
+        /* Update Ethernet hook params from the SDP */
         aes67_sink_t sink;
         if (aes67_session_get_sink(s_session, sink_id, &sink) == ESP_OK) {
             s_hook_word_length = sink.rtp_config.word_length;
-            ESP_LOGI("main", "Hook word_length set to %u", s_hook_word_length);
+            s_hook_channels = sink.rtp_config.channels;
+            ESP_LOGI("main", "Hook: wl=%u ch=%u", s_hook_word_length, s_hook_channels);
         }
         ESP_LOGI("main", "Sink added (id=%u) -- receiving \"%s\"",
                  sink_id, source->name);
@@ -159,6 +162,7 @@ static int16_t *s_hook_i16 = NULL;
 static uint32_t s_hook_pkt_count = 0;
 StreamBufferHandle_t s_hook_sbuf = NULL;  /* Global: shared with playback task */
 uint8_t s_hook_word_length = 3;          /* Default L24. Updated from SDP. */
+uint8_t s_hook_channels = 2;             /* Default stereo. Updated from SDP. */
 
 /* Called for EVERY Ethernet frame, before lwIP.
  * RTP multicast on port 5004: process + free. Everything else: forward to lwIP. */
@@ -229,24 +233,28 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
         payload_len = rtp_payload;  /* Trim to actual RTP payload */
     }
 
-    /* Use word length from SDP (set when sink is added) */
+    /* Use word length and channel count from SDP (set when sink is added) */
     int wl = s_hook_word_length;
-    int frame_bytes = 2 * wl;  /* stereo: 2 channels * wl bytes */
+    int ch = s_hook_channels;
+    int frame_bytes = ch * wl;
     int frames = payload_len / frame_bytes;
-    if (frames <= 0 || frames > 192) goto forward;
+    if (frames <= 0 || frames > AES67_MAX_TIC_FRAMES) goto forward;
 
-    /* Convert to int32, left channel only for mono speaker */
-    aes67_convert_from_net(payload, s_hook_tmp32, frames, 2, wl);
+    /* Convert to int32 */
+    aes67_convert_from_net(payload, s_hook_tmp32, frames, ch, wl);
+
+    /* For mono speaker: duplicate left channel to all output slots */
     for (int i = 0; i < frames; i++) {
-        int32_t left = s_hook_tmp32[i * 2];
-        s_hook_tmp32[i * 2]     = left;
-        s_hook_tmp32[i * 2 + 1] = left;
+        int32_t left = s_hook_tmp32[i * ch];
+        for (int c = 0; c < ch; c++) {
+            s_hook_tmp32[i * ch + c] = left;
+        }
     }
 
-    /* Write int32 stereo to stream buffer */
+    /* Write int32 to stream buffer */
     if (s_hook_sbuf) {
         xStreamBufferSend(s_hook_sbuf, s_hook_tmp32,
-                           frames * 2 * sizeof(int32_t), 0);
+                           frames * ch * sizeof(int32_t), 0);
     }
 
     s_hook_pkt_count++;
@@ -338,9 +346,12 @@ static esp_err_t ethernet_init(esp_eth_handle_t *out_eth_handle)
 
     /* Ethernet RTP hook: intercept RTP at MAC level before lwIP */
     s_original_priv = eth_netif;
-    s_hook_tmp32 = heap_caps_malloc(192 * 2 * sizeof(int32_t), MALLOC_CAP_INTERNAL);
-    s_hook_i16 = heap_caps_malloc(192 * 2 * sizeof(int16_t),
-                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    s_hook_tmp32 = heap_caps_malloc(
+        AES67_MAX_TIC_FRAMES * AES67_MAX_CHANNELS_PER_STREAM * sizeof(int32_t),
+        MALLOC_CAP_INTERNAL);
+    s_hook_i16 = heap_caps_malloc(
+        AES67_MAX_TIC_FRAMES * AES67_MAX_CHANNELS_PER_STREAM * sizeof(int16_t),
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     esp_eth_update_input_path_info(eth_handle, eth_rtp_hook, eth_netif);
     ESP_LOGI(TAG, "Ethernet RTP hook installed");
 
@@ -508,9 +519,17 @@ void app_main(void)
     ESP_ERROR_CHECK(aes67_node_start(node));
 
     /* Create stream buffer for Ethernet hook -> playback task path.
-     * int32 stereo: 192 frames * 2ch * 4 bytes = 1536 bytes per packet.
-     * Buffer holds 8 packets (12288 bytes). Trigger at 1536 (one packet). */
-    s_hook_sbuf = xStreamBufferCreate(12288, 1536);
+     * Sized for max packet * 8 packets of buffering. */
+    {
+        aes67_stream_params_t sp;
+        aes67_stream_params_compute(&sp,
+                                    aes67_cfg.audio.sample_rate,
+                                    aes67_cfg.audio.channels,
+                                    aes67_cfg.audio.word_length,
+                                    aes67_cfg.audio.packet_time_us);
+        uint32_t pkt_native = sp.packet_native_size;
+        s_hook_sbuf = xStreamBufferCreate(pkt_native * 8, pkt_native);
+    }
 
     /* Set up the Ethernet hook's I2S channel (for stats, not direct write) */
     {

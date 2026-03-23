@@ -129,25 +129,46 @@ static void playback_task(void *arg)
 {
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
 
-    const uint32_t spp = 192;  /* Read full source packets */
-    const uint32_t max_packets = 3;  /* Read up to 3 packets per cycle */
-    const uint8_t ch = node->config.audio.channels;
+    /* Compute stream params from config */
+    aes67_stream_params_t params;
+    aes67_stream_params_compute(&params,
+                                node->config.audio.sample_rate,
+                                node->config.audio.channels,
+                                node->config.audio.word_length,
+                                node->config.audio.packet_time_us);
 
-    int32_t *buf = heap_caps_malloc(spp * ch * sizeof(int32_t),
-                                    MALLOC_CAP_INTERNAL);
+    const uint32_t spp = params.samples_per_packet;
+    const uint32_t max_packets = 3;  /* Read up to 3 packets per cycle */
+    const uint8_t ch = params.channels;
+    const uint32_t pkt_native_bytes = params.packet_native_size;
+
+    int32_t *buf = heap_caps_malloc(pkt_native_bytes, MALLOC_CAP_INTERNAL);
     if (!buf) {
         ESP_LOGE(TAG, "Playback task: alloc failed");
         vTaskDelete(NULL);
         return;
     }
 
+    /* Allocate playback double-buffers (sized to actual stream params) */
+    int32_t *pcm_buf = heap_caps_malloc(pkt_native_bytes, MALLOC_CAP_INTERNAL);
+    int32_t *prev_buf = heap_caps_malloc(pkt_native_bytes, MALLOC_CAP_INTERNAL);
+    if (!pcm_buf || !prev_buf) {
+        ESP_LOGE(TAG, "Playback task: double-buffer alloc failed");
+        heap_caps_free(buf);
+        heap_caps_free(pcm_buf);
+        heap_caps_free(prev_buf);
+        vTaskDelete(NULL);
+        return;
+    }
+    bool have_prev = false;
+
     extern esp_err_t aes67_audio_direct_write(
         aes67_audio_handle_t handle,
         const int32_t *samples, uint32_t frame_count);
     extern uint32_t aes67_rtp_sink_available(aes67_rtp_stream_handle_t stream);
 
-    ESP_LOGI(TAG, "Playback task started (spp=%lu, max %lu pkts/cycle)",
-             (unsigned long)spp, (unsigned long)max_packets);
+    ESP_LOGI(TAG, "Playback task started (spp=%lu, ch=%u, pkt=%lu bytes)",
+             (unsigned long)spp, ch, (unsigned long)pkt_native_bytes);
 
     aes67_rtp_stream_handle_t cached_sink = NULL;
     bool prefilled = false;
@@ -196,19 +217,15 @@ static void playback_task(void *arg)
         }
 
         /* DMA-paced playback with auto_clear=false:
-         * 1. Write previous data to I2S (BLOCKS ~4ms until DMA frees descriptor)
-         * 2. During the 4ms block, raw callback fills stream buffer
+         * 1. Write previous data to I2S (BLOCKS until DMA frees descriptor)
+         * 2. During the block, raw callback fills stream buffer
          * 3. Read new data from stream buffer (should be ready instantly)
          * 4. Loop to step 1 with the new data
          *
-         * The i2s_channel_write blocking IS the 48kHz pacing mechanism.
+         * The i2s_channel_write blocking IS the sample-rate pacing mechanism.
          * With auto_clear=false, if we don't write, DMA replays old audio. */
-        /* 24-bit I2S uses int32 (left-justified) per sample */
-        const uint32_t pkt_bytes = 192 * ch * sizeof(int32_t);  /* 1536 bytes */
-        static int32_t pcm_buf[192 * 2];   /* Static to avoid stack overflow */
-        static int32_t prev_buf[192 * 2];
-        static bool have_prev = false;
-        uint32_t frames = 192;
+        const uint32_t pkt_bytes = pkt_native_bytes;
+        uint32_t frames = spp;
 
         extern i2s_chan_handle_t aes67_audio_get_tx_chan(void *h);
         i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
@@ -255,6 +272,8 @@ static void playback_task(void *arg)
     }
 
     heap_caps_free(buf);
+    heap_caps_free(pcm_buf);
+    heap_caps_free(prev_buf);
     ESP_LOGI(TAG, "Playback task stopped");
     vTaskDelete(NULL);
 }

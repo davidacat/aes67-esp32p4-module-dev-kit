@@ -24,10 +24,9 @@ static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA: 4 descriptors at 192 frames = 768 frames = 16ms.
- * v1.1.0 setting. */
+/* I2S DMA descriptor count. Frame count per descriptor is computed
+ * from the audio config's samples_per_packet at init time. */
 #define DMA_DESC_NUM            4
-#define DMA_FRAME_NUM           192
 
 
 struct aes67_audio_ctx {
@@ -305,8 +304,8 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     /* Official ESP-IDF es8311 example for ESP32-P4 uses I2S_NUM_0 */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
-    chan_cfg.dma_frame_num = DMA_FRAME_NUM;
-    chan_cfg.auto_clear = false;   /* v1.1.0 setting: DMA pacing via write blocking */
+    chan_cfg.dma_frame_num = ctx->frame_size;  /* Derived from sample_rate * packet_time */
+    chan_cfg.auto_clear = false;   /* DMA pacing via write blocking */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {
@@ -362,10 +361,9 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     ctx->playback_rd = 0;
 
     /* Staging ring: RTP RX writes int16, DMA ISR reads.
-     * 40ms at 48kHz stereo = 1920 frames * 2ch = 3840 samples.
-     * ~10 packets of headroom to absorb network jitter and
+     * 10 packets of headroom to absorb network jitter and
      * phase differences between packet arrival and DMA consumption. */
-    ctx->staging_size = 1920 * audio_config->channels;
+    ctx->staging_size = ctx->frame_size * 10 * audio_config->channels;
     ctx->staging_buf = heap_caps_calloc(ctx->staging_size, sizeof(int16_t),
                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!ctx->staging_buf) {
@@ -384,8 +382,8 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     }
 
     /* Pre-allocate int16 conversion buffer for direct_write.
-     * Size for max batch: 4800 frames * channels. */
-    ctx->i2s_conv_buf_samples = 4800 * audio_config->channels;
+     * Size for max batch: 25 packets worth of frames. */
+    ctx->i2s_conv_buf_samples = ctx->frame_size * 25 * audio_config->channels;
     ctx->i2s_conv_buf = heap_caps_malloc(
         ctx->i2s_conv_buf_samples * sizeof(int16_t),
         MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
@@ -446,8 +444,8 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
     extern void aes67_audio_read_clock_divider(aes67_audio_handle_t h);
     aes67_audio_read_clock_divider(handle);
 
-    ESP_LOGI(TAG, "Audio started (DMA: %d desc x %d frames)",
-             DMA_DESC_NUM, DMA_FRAME_NUM);
+    ESP_LOGI(TAG, "Audio started (DMA: %d desc x %lu frames)",
+             DMA_DESC_NUM, (unsigned long)handle->frame_size);
     return ESP_OK;
 }
 

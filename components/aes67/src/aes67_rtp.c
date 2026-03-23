@@ -10,6 +10,7 @@
  */
 
 #include "aes67_rtp.h"
+#include "aes67_config.h"
 #include "aes67_convert.h"
 #include "aes67_net.h"
 #include <string.h>
@@ -34,7 +35,7 @@ static const char *TAG = "aes67_rtp";
 #define AES67_MAX_STREAMS       (CONFIG_AES67_MAX_SOURCES + CONFIG_AES67_MAX_SINKS)
 #define AES67_RX_TASK_STACK     4096
 #define AES67_RX_BUF_SIZE       2048
-#define AES67_JITTER_BUF_MULT   6   /* 6 * packet_size, ~24ms for 192-frame packets */
+#define AES67_JITTER_BUF_MULT   6   /* 6 * packet_size for jitter absorption */
 
 /* Ring buffer for audio data. Single reader, single writer. */
 typedef struct {
@@ -382,22 +383,15 @@ static void raw_udp_recv_cb(void *arg, struct udp_pcb *pcb,
     uint32_t frame_size_bytes = channels * wl;
     if (frame_size_bytes == 0 || payload_len < frame_size_bytes) return;
     uint32_t frames = payload_len / frame_size_bytes;
-    if (frames > 192) frames = 192;  /* Clamp to buffer size */
+    if (frames > AES67_MAX_TIC_FRAMES) frames = AES67_MAX_TIC_FRAMES;
 
     int32_t *sample_buf = engine->raw_sample_buf;
     aes67_convert_from_net(payload, sample_buf, frames, channels, wl);
 
-    /* Mono mix + int16 conversion + stream buffer write */
-    if (engine->audio_stream_buf && channels == 2) {
-        int16_t i16buf[frames * channels];
-        for (uint32_t f = 0; f < frames; f++) {
-            int32_t mono = (sample_buf[f*2] >> 1) + (sample_buf[f*2+1] >> 1);
-            int16_t s16 = (int16_t)(mono >> 16);
-            i16buf[f * 2] = s16;
-            i16buf[f * 2 + 1] = s16;
-        }
-        xStreamBufferSend(engine->audio_stream_buf, i16buf,
-                           frames * channels * sizeof(int16_t), 0);
+    /* Write converted int32 samples to stream buffer for playback */
+    if (engine->audio_stream_buf) {
+        xStreamBufferSend(engine->audio_stream_buf, sample_buf,
+                           frames * channels * sizeof(int32_t), 0);
     }
 
     raw_cb_processed++;
@@ -430,9 +424,9 @@ static void rx_task_func(void *arg)
         return;
     }
 
-    /* Temporary buffer for converted samples (worst case: 64 channels * max packet) */
+    /* Temporary buffer for converted samples (worst case: max channels * max frames) */
     int32_t *sample_buf = heap_caps_malloc(
-        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 192 * sizeof(int32_t),
+        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * AES67_MAX_TIC_FRAMES * sizeof(int32_t),
         MALLOC_CAP_INTERNAL);
     if (!sample_buf) {
         ESP_LOGE(TAG, "Failed to allocate sample conversion buffer");
@@ -571,8 +565,8 @@ static void rx_task_func(void *arg)
         uint32_t frames = payload_len / frame_size_bytes;
 
         /* Limit to conversion buffer capacity */
-        uint32_t max_frames = CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 192 /
-                              channels;
+        uint32_t max_frames = CONFIG_AES67_MAX_CHANNELS_PER_STREAM *
+                              AES67_MAX_TIC_FRAMES / channels;
         if (frames > max_frames) frames = max_frames;
 
         aes67_convert_from_net(payload, sample_buf, frames, channels, wl);
@@ -580,34 +574,11 @@ static void rx_task_func(void *arg)
         /* Direct I2S write with DMA prefill. Buffer the first 3 packets
          * (12ms) to fill the DMA ring, then write each packet as it
          * arrives. The DMA stays ~12ms ahead, absorbing network jitter. */
-        if (engine->audio_handle && channels == 2) {
-            extern esp_err_t aes67_audio_direct_write(
-                void *h, const int32_t *samples, uint32_t frame_count);
-
-            /* Mono mix in-place */
-            for (uint32_t f = 0; f < frames; f++) {
-                int32_t left  = sample_buf[f * 2];
-                int32_t right = sample_buf[f * 2 + 1];
-                int32_t mono  = (left >> 1) + (right >> 1);
-                sample_buf[f * 2]     = mono;
-                sample_buf[f * 2 + 1] = mono;
-            }
-
-            /* All packets go to stream buffer. Playback task handles I2S.
-             * No direct I2S writes from RTP RX -- avoids contention. */
-            if (engine->audio_stream_buf) {
-                int16_t i16buf[frames * channels];
-                for (uint32_t f = 0; f < frames; f++) {
-                    int32_t mono = (sample_buf[f*2] >> 1) + (sample_buf[f*2+1] >> 1);
-                    int16_t s16 = (int16_t)(mono >> 16);
-                    i16buf[f * 2] = s16;
-                    i16buf[f * 2 + 1] = s16;
-                }
-                xStreamBufferSend(engine->audio_stream_buf, i16buf,
-                                   frames * channels * sizeof(int16_t), 0);
-            }
+        /* Route converted int32 samples to stream buffer or jitter buffer */
+        if (engine->audio_stream_buf) {
+            xStreamBufferSend(engine->audio_stream_buf, sample_buf,
+                               frames * channels * sizeof(int32_t), 0);
         } else {
-            /* Non-stereo fallback: jitter buffer */
             uint32_t data_bytes = frames * channels * sizeof(int32_t);
             ringbuf_write(&stream->ring,
                           (const uint8_t *)sample_buf, data_bytes);
@@ -670,8 +641,13 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     engine->rx_task = NULL;
     engine->stream_count = 0;
 
-    /* Stream buffer: 64ms at 48kHz stereo int16 = 12288 bytes. */
-    engine->audio_stream_buf = xStreamBufferCreate(12288, 768);
+    /* Stream buffer: sized for max packet payload * buffering depth.
+     * Max single packet = MAX_TIC_FRAMES * MAX_CHANNELS * 4 bytes (int32).
+     * Buffer 8 packets for jitter absorption. Trigger at 1 packet. */
+    uint32_t max_pkt_native = AES67_MAX_TIC_FRAMES *
+                              CONFIG_AES67_MAX_CHANNELS_PER_STREAM * sizeof(int32_t);
+    uint32_t sbuf_size = max_pkt_native * 8;
+    engine->audio_stream_buf = xStreamBufferCreate(sbuf_size, max_pkt_native);
 
     /* Raw lwIP UDP PCB -- bypasses socket layer for RTP receive.
      * Processes packets directly in lwIP callback context. */
@@ -691,7 +667,7 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
 
     /* Pre-allocate conversion buffer for the raw callback */
     engine->raw_sample_buf = heap_caps_malloc(
-        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 192 * sizeof(int32_t),
+        CONFIG_AES67_MAX_CHANNELS_PER_STREAM * AES67_MAX_TIC_FRAMES * sizeof(int32_t),
         MALLOC_CAP_INTERNAL);
     if (!engine->audio_stream_buf) {
         ESP_LOGE(TAG, "Failed to create audio stream buffer");

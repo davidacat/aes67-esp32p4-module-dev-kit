@@ -154,7 +154,7 @@ function updateSlots(prefix,arr){
     var slot=g(prefix+"-slot-"+i),data=ids[i];
     if(data){
       any=true;
-      slot.style.display="";
+      slot.style.display="block";
       var on=prefix==="src"?true:data.active;
       g(prefix+"-"+i+"-dot").className="dot "+(on?"dg":"dr");
       g(prefix+"-"+i+"-name").textContent=data.name||"--";

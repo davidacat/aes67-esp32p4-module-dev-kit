@@ -177,28 +177,39 @@ static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
  * directly, bypassing the playback task entirely for zero overhead. */
 static StreamBufferHandle_t s_isr_stream_buf = NULL;
 
+/* ISR diagnostics (read by monitor task) */
+static volatile uint32_t s_isr_fires = 0;
+static volatile uint32_t s_isr_full = 0;     /* ISR got a full descriptor of data */
+static volatile uint32_t s_isr_partial = 0;  /* ISR got some data but not full descriptor */
+static volatile uint32_t s_isr_empty = 0;    /* ISR got zero bytes (silence) */
+
 /* ISR callback: fires when a DMA descriptor finishes playing (every 4ms).
  * Reads int32 audio data directly from the stream buffer into the DMA
- * descriptor. If no data is available, writes silence. This completely
- * bypasses i2s_channel_write and the playback task, eliminating all
- * task scheduling overhead that caused the 10% throughput loss. */
+ * descriptor. If no data is available, writes silence. */
 static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
                                             i2s_event_data_t *event,
                                             void *user_ctx)
 {
     BaseType_t woken = pdFALSE;
+    s_isr_fires++;
 
     if (s_isr_stream_buf) {
         size_t received = xStreamBufferReceiveFromISR(s_isr_stream_buf,
                                                        event->dma_buf,
                                                        event->size,
                                                        &woken);
-        /* Silence-fill any remaining bytes */
-        if (received < event->size) {
+        if (received >= event->size) {
+            s_isr_full++;
+        } else if (received > 0) {
+            s_isr_partial++;
             memset((uint8_t *)event->dma_buf + received, 0,
                    event->size - received);
+        } else {
+            s_isr_empty++;
+            memset(event->dma_buf, 0, event->size);
         }
     } else {
+        s_isr_empty++;
         memset(event->dma_buf, 0, event->size);
     }
 
@@ -206,6 +217,25 @@ static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
     esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
     return woken == pdTRUE;
+}
+
+/* Called periodically to log ISR stats */
+void aes67_audio_log_isr_stats(void)
+{
+    uint32_t fires = s_isr_fires;
+    uint32_t full = s_isr_full;
+    uint32_t partial = s_isr_partial;
+    uint32_t empty = s_isr_empty;
+    s_isr_fires = 0;
+    s_isr_full = 0;
+    s_isr_partial = 0;
+    s_isr_empty = 0;
+    if (fires > 0) {
+        ESP_LOGI("dma_isr", "fires=%lu full=%lu partial=%lu empty=%lu (%lu%% util)",
+                 (unsigned long)fires, (unsigned long)full,
+                 (unsigned long)partial, (unsigned long)empty,
+                 (unsigned long)(full * 100 / fires));
+    }
 }
 
 /* Set the stream buffer for ISR-driven playback */

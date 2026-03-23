@@ -612,10 +612,10 @@ void app_main(void)
 
     ESP_LOGI(TAG, "node ready (TX source disabled for RX throughput test)");
 
-    /* TX test tone disabled: it sends 1000 pkts/sec on port 5004 which
-     * our own recvfrom() receives and must process, stealing ~10% of
-     * the RTP RX task's time from real sink packets. */
+    /* Log ISR and hook stats every 5 seconds */
+    extern void aes67_audio_log_isr_stats(void);
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        aes67_audio_log_isr_stats();
     }
 }

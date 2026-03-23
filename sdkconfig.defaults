@@ -71,6 +71,9 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 # Performance optimization (-O2, critical for real-time audio paths)
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
+# I2S ISR runs from IRAM (safe even when flash cache is disabled)
+CONFIG_I2S_ISR_IRAM_SAFE=y
+
 # Disable power management (real-time audio needs consistent performance)
 CONFIG_PM_ENABLE=n
 

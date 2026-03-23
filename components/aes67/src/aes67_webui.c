@@ -681,9 +681,15 @@ static void ws_push_task(void *arg)
                 }
                 if (!first) buf[pos++] = ',';
                 first = false;
+                const char *codec = aes67_codec_to_str(src.rtp_config.codec);
                 pos += snprintf(buf + pos, JSON_BUF_SIZE - pos,
-                    "{\"id\":%u,\"name\":\"%s\",\"tx\":%lu}",
-                    src.id, src.name, (unsigned long)rtp_st.packets_sent);
+                    "{\"id\":%u,\"name\":\"%s\",\"codec\":\"%s\",\"rate\":%lu,"
+                    "\"ch\":%u,\"ptime\":%u,\"tx\":%lu}",
+                    src.id, src.name, codec,
+                    (unsigned long)src.rtp_config.sample_rate,
+                    src.rtp_config.channels,
+                    src.rtp_config.packet_time_us,
+                    (unsigned long)rtp_st.packets_sent);
                 if (pos >= JSON_BUF_SIZE - 256) break;
             }
         }
@@ -705,10 +711,15 @@ static void ws_push_task(void *arg)
                 }
                 if (!first) buf[pos++] = ',';
                 first = false;
+                const char *scodec = aes67_codec_to_str(sink.rtp_config.codec);
                 pos += snprintf(buf + pos, JSON_BUF_SIZE - pos,
-                    "{\"id\":%u,\"name\":\"%s\",\"rx\":%lu,\"lost\":%lu,"
+                    "{\"id\":%u,\"name\":\"%s\",\"codec\":\"%s\",\"rate\":%lu,"
+                    "\"ch\":%u,\"ptime\":%u,\"rx\":%lu,\"lost\":%lu,"
                     "\"jitter\":%ld,\"active\":%s}",
-                    sink.id, sink.name,
+                    sink.id, sink.name, scodec,
+                    (unsigned long)sink.rtp_config.sample_rate,
+                    sink.rtp_config.channels,
+                    sink.rtp_config.packet_time_us,
                     (unsigned long)rtp_st.packets_received,
                     (unsigned long)rtp_st.packets_lost,
                     (long)rtp_st.jitter_us,

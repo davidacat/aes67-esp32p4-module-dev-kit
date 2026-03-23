@@ -103,12 +103,44 @@ function renderStreams(arr,isSink){
     var on=isSink?s.active:true;
     h+='<div class="stream"><div style="display:flex;justify-content:space-between;align-items:center">';
     h+='<span class="sname">'+(on?'<span class="dot dot-g"></span>':'<span class="dot dot-r"></span>')+esc(s.name)+'</span>';
-    if(isSink)h+='<button class="btn" style="background:#c44;font-size:10px;padding:1px 6px" onclick="delSink('+s.id+')">x</button>';
-    h+='</div><div class="sinfo">'+(isSink?"RX":"TX")+": "+fmt(isSink?s.rx:s.tx)+" pkts";
+    h+='<span>';
+    if(isSink){
+      h+='<button class="btn" style="font-size:10px;padding:1px 6px;margin-right:4px" onclick="toggleEdit(\'sink\','+s.id+')">edit</button>';
+      h+='<button class="btn" style="background:#c44;font-size:10px;padding:1px 6px" onclick="delSink('+s.id+')">x</button>';
+    } else {
+      h+='<button class="btn" style="font-size:10px;padding:1px 6px" onclick="toggleEdit(\'src\','+s.id+')">info</button>';
+    }
+    h+='</span></div>';
+    h+='<div class="sinfo">'+(s.codec||"?")+' / '+(s.rate?fmt(s.rate)+"Hz":"?")+' / '+(s.ch||"?")+'ch / '+((s.ptime||0)/1000).toFixed(1)+'ms</div>';
+    h+='<div class="sinfo">'+(isSink?"RX":"TX")+": "+fmt(isSink?s.rx:s.tx)+" pkts";
     if(isSink)h+=" | Lost: "+fmt(s.lost)+" | Jitter: "+fmt(s.jitter)+"\u00b5s";
-    h+="</div></div>";
+    h+="</div>";
+    h+='<div id="edit-'+(isSink?"sink":"src")+'-'+s.id+'" style="display:none;margin-top:6px;padding-top:6px;border-top:1px solid #333">';
+    if(isSink){
+      h+='<div class="lbl">Name:</div><input style="width:100%;background:#1a1a1a;border:1px solid #333;color:#ccc;padding:3px 6px;margin:2px 0 4px;font:11px inherit" id="edit-sink-name-'+s.id+'" value="'+esc(s.name)+'">';
+      h+='<div class="lbl">SDP (paste to re-subscribe):</div><textarea style="width:100%;min-height:50px;background:#1a1a1a;border:1px solid #333;color:#ccc;padding:3px 6px;margin:2px 0 4px;font:10px/1.3 inherit;resize:vertical" id="edit-sink-sdp-'+s.id+'" placeholder="Paste SDP to re-subscribe..."></textarea>';
+      h+='<button class="btn" onclick="resubSink('+s.id+')">Re-subscribe</button>';
+    } else {
+      h+='<div class="lbl">Source ID: '+s.id+'</div>';
+    }
+    h+='</div></div>';
   }
   return h;
+}
+
+function toggleEdit(type,id){
+  var e=document.getElementById("edit-"+type+"-"+id);
+  if(e)e.style.display=e.style.display==="none"?"block":"none";
+}
+
+function resubSink(id){
+  var name=document.getElementById("edit-sink-name-"+id);
+  var sdp=document.getElementById("edit-sink-sdp-"+id);
+  if(!sdp||!sdp.value.trim()){alert("Paste SDP text to re-subscribe");return}
+  fetch("/api/sinks/"+id,{method:"DELETE"}).then(function(){
+    return fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:name?name.value:"Sink",sdp:sdp.value})});
+  });
 }
 
 function renderRemotes(arr){

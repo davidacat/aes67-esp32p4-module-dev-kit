@@ -42,8 +42,9 @@
 #include "driver/i2s_std.h"
 #include "es8311.h"
 
-/* Session handle for SAP callback */
+/* Session and node handles for callbacks */
 static aes67_session_handle_t s_session = NULL;
+static aes67_node_handle_t s_node = NULL;
 static bool s_sink_added = false;
 
 /* Stream params for the Ethernet RTP hook (defined below, used by SAP callback) */
@@ -73,7 +74,20 @@ static void sap_discovery_cb(bool is_announce,
         if (aes67_session_get_sink(s_session, sink_id, &sink) == ESP_OK) {
             s_hook_word_length = sink.rtp_config.word_length;
             s_hook_channels = sink.rtp_config.channels;
-            ESP_LOGI("main", "Hook: wl=%u ch=%u", s_hook_word_length, s_hook_channels);
+            ESP_LOGI("main", "Hook: wl=%u ch=%u rate=%lu",
+                     s_hook_word_length, s_hook_channels,
+                     (unsigned long)sink.rtp_config.sample_rate);
+
+            /* Match I2S sample rate to the source BEFORE packets arrive.
+             * The IGMP join just happened -- there's a brief window before
+             * the switch starts forwarding multicast to us. */
+            if (s_node && sink.rtp_config.sample_rate > 0) {
+                aes67_audio_handle_t audio = NULL;
+                aes67_node_get_audio(s_node, &audio);
+                if (audio) {
+                    aes67_audio_set_sample_rate(audio, sink.rtp_config.sample_rate);
+                }
+            }
         }
         ESP_LOGI("main", "Sink added (id=%u) -- receiving \"%s\"",
                  sink_id, source->name);
@@ -559,6 +573,7 @@ void app_main(void)
     /* Initialize the AES67 node */
     aes67_node_handle_t node = NULL;
     ESP_ERROR_CHECK(aes67_node_init(&aes67_cfg, &node));
+    s_node = node;
 
     /* Create stream buffer BEFORE starting the node. The DMA ISR callback
      * reads directly from this buffer, bypassing the playback task.

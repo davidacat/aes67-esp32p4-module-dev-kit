@@ -162,6 +162,12 @@ void aes67_audio_init_capture(aes67_audio_handle_t handle);
 StreamBufferHandle_t aes67_audio_get_capture_buf(aes67_audio_handle_t handle);
 
 /**
+ * Switch I2S sample rate. Call once before data starts flowing
+ * (e.g. after SAP discovery, before first RTP packet arrives).
+ */
+esp_err_t aes67_audio_set_sample_rate(aes67_audio_handle_t handle, uint32_t sample_rate);
+
+/**
  * Adjust the I2S TX MCLK divider for adaptive clock recovery.
  * ppm_adj: parts-per-million adjustment. +100 = 0.01% faster.
  */

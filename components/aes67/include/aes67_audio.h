@@ -131,13 +131,23 @@ void aes67_audio_get_staging_stats(aes67_audio_handle_t handle,
                                     uint32_t *isr_count, uint32_t *underruns);
 
 /**
- * Set the stream buffer for ISR-driven playback. The DMA ISR reads
- * directly from this buffer, bypassing i2s_channel_write and the
- * playback task. Must be called BEFORE aes67_audio_start().
+ * Initialize ISR-driven playback via slot ring. Must be called
+ * BEFORE aes67_audio_start(). The DMA ISR reads from the slot ring
+ * which is fed by aes67_audio_slot_write().
  */
 #include "freertos/stream_buffer.h"
 void aes67_audio_set_isr_stream_buf(aes67_audio_handle_t handle,
                                      StreamBufferHandle_t sbuf);
+
+/**
+ * Write one packet to the slot ring (called from Ethernet hook).
+ */
+void aes67_audio_slot_write(const void *data, uint32_t len);
+
+/**
+ * Log ISR statistics.
+ */
+void aes67_audio_log_isr_stats(void);
 
 /**
  * Adjust the I2S TX MCLK divider for adaptive clock recovery.

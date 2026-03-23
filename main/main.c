@@ -267,14 +267,9 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
         }
     }
 
-    /* Write int32 to stream buffer */
-    if (s_hook_sbuf) {
-        size_t sent = xStreamBufferSend(s_hook_sbuf, s_hook_tmp32,
-                                         frames * ch * sizeof(int32_t), 0);
-        if (sent == 0) {
-            s_hook_drop_count++;
-        }
-    }
+    /* Write int32 to the slot ring (read by DMA ISR) */
+    extern void aes67_audio_slot_write(const void *data, uint32_t len);
+    aes67_audio_slot_write(s_hook_tmp32, frames * ch * sizeof(int32_t));
 
     s_hook_pkt_count++;
     if ((s_hook_pkt_count % 5000) == 0) {

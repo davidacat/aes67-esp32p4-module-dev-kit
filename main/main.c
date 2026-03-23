@@ -160,6 +160,8 @@ static i2s_chan_handle_t s_hook_tx_chan = NULL;
 static int32_t *s_hook_tmp32 = NULL;
 static int16_t *s_hook_i16 = NULL;
 static uint32_t s_hook_pkt_count = 0;
+static uint32_t s_hook_drop_count = 0;   /* Stream buffer full drops */
+static uint32_t s_hook_fwd_count = 0;    /* Packets forwarded to lwIP (not RTP) */
 StreamBufferHandle_t s_hook_sbuf = NULL;  /* Global: shared with playback task */
 uint8_t s_hook_word_length = 3;          /* Default L24. Updated from SDP. */
 uint8_t s_hook_channels = 2;             /* Default stereo. Updated from SDP. */
@@ -248,19 +250,27 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
 
     /* Write int32 to stream buffer */
     if (s_hook_sbuf) {
-        xStreamBufferSend(s_hook_sbuf, s_hook_tmp32,
-                           frames * ch * sizeof(int32_t), 0);
+        size_t sent = xStreamBufferSend(s_hook_sbuf, s_hook_tmp32,
+                                         frames * ch * sizeof(int32_t), 0);
+        if (sent == 0) {
+            s_hook_drop_count++;
+        }
     }
 
     s_hook_pkt_count++;
-    if ((s_hook_pkt_count % 10000) == 0) {
-        ESP_LOGI("eth_hook", "RTP: %lu pkts", (unsigned long)s_hook_pkt_count);
+    if ((s_hook_pkt_count % 5000) == 0) {
+        ESP_LOGI("eth_hook", "RTP: %lu pkts, %lu drops, %lu fwd, sb=%u",
+                 (unsigned long)s_hook_pkt_count,
+                 (unsigned long)s_hook_drop_count,
+                 (unsigned long)s_hook_fwd_count,
+                 s_hook_sbuf ? (unsigned)xStreamBufferBytesAvailable(s_hook_sbuf) : 0);
     }
 
     free(buffer);  /* We consumed the frame */
     return ESP_OK;
 
 forward:
+    s_hook_fwd_count++;
     /* Not RTP -- forward to lwIP via esp_netif_receive */
     if (s_original_priv) {
         return esp_netif_receive((esp_netif_t *)s_original_priv, buffer, length, NULL);

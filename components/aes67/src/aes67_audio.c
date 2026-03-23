@@ -247,23 +247,35 @@ static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
     return woken == pdTRUE;
 }
 
-/* Log ISR stats */
+/* Log ISR stats -- only on first lock and on underruns */
 void aes67_audio_log_isr_stats(void)
 {
+    static bool first_100_logged = false;
+    static uint32_t prev_empty_total = 0;
+
     uint32_t fires = s_isr_fires;
     uint32_t full = s_isr_full;
     uint32_t empty = s_isr_empty;
     s_isr_fires = 0;
     s_isr_full = 0;
     s_isr_empty = 0;
-    if (fires > 0) {
-        size_t sb = s_isr_stream_buf ?
-                    xStreamBufferBytesAvailable(s_isr_stream_buf) : 0;
-        ESP_LOGI("dma_isr", "fires=%lu full=%lu empty=%lu (%lu%%) sb=%u",
-                 (unsigned long)fires, (unsigned long)full,
-                 (unsigned long)empty,
-                 (unsigned long)(full * 100 / fires),
-                 (unsigned)sb);
+
+    if (fires == 0) return;
+
+    uint32_t pct = full * 100 / fires;
+
+    /* Log once when first reaching 100% */
+    if (!first_100_logged && pct == 100) {
+        first_100_logged = true;
+        ESP_LOGI("dma_isr", "locked: %lu Hz, 100%% utilization", (unsigned long)(fires / 2));
+    }
+
+    /* Log whenever there are underruns (after initial lock) */
+    if (first_100_logged && empty > 0) {
+        prev_empty_total += empty;
+        ESP_LOGW("dma_isr", "underrun: %lu empty in %lu fires (%lu%%), total=%lu",
+                 (unsigned long)empty, (unsigned long)fires,
+                 (unsigned long)pct, (unsigned long)prev_empty_total);
     }
 }
 

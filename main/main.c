@@ -292,15 +292,16 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
     aes67_audio_slot_write(s_hook_tmp32, frames * ch * sizeof(int32_t));
 
     s_hook_pkt_count++;
-    if ((s_hook_pkt_count % 5000) == 0) {
-        ESP_LOGI("eth_hook", "RTP: %lu pkts, %lu drops, %lu fwd | "
-                 "seq: %lu gaps, %lu lost | sb=%u",
-                 (unsigned long)s_hook_pkt_count,
-                 (unsigned long)s_hook_drop_count,
-                 (unsigned long)s_hook_fwd_count,
+
+    /* Log only on problems or at major milestones */
+    static uint32_t s_last_seq_lost = 0;
+    if (s_hook_seq_lost != s_last_seq_lost) {
+        /* Packet loss detected -- log immediately */
+        ESP_LOGW("eth_hook", "SEQ LOSS: %lu gaps, %lu lost (total %lu pkts)",
                  (unsigned long)s_hook_seq_gaps,
                  (unsigned long)s_hook_seq_lost,
-                 s_hook_sbuf ? (unsigned)xStreamBufferBytesAvailable(s_hook_sbuf) : 0);
+                 (unsigned long)s_hook_pkt_count);
+        s_last_seq_lost = s_hook_seq_lost;
     }
 
     free(buffer);  /* We consumed the frame */
@@ -655,35 +656,12 @@ void app_main(void)
     int32_t tone_buf[samples_per_packet * 2];
     uint32_t phase = 0;
 
-    ESP_LOGI(TAG, "node ready (TX source disabled for RX throughput test)");
+    ESP_LOGI(TAG, "node ready");
 
-    /* Log stats every 2 seconds */
+    /* Monitor loop: check ISR health, only log on problems */
     extern void aes67_audio_log_isr_stats(void);
-    uint32_t last_total = 0, last_rtp = 0, last_fwd = 0;
-    TickType_t last_tick = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         aes67_audio_log_isr_stats();
-
-        uint32_t now_total = s_hook_total_frames;
-        uint32_t now_rtp = s_hook_pkt_count;
-        uint32_t now_fwd = s_hook_fwd_count;
-        TickType_t now_tick = xTaskGetTickCount();
-        if (last_tick > 0) {
-            uint32_t dt_ms = (now_tick - last_tick) * portTICK_PERIOD_MS;
-            if (dt_ms > 0) {
-                uint32_t total_fps = (now_total - last_total) * 1000UL / dt_ms;
-                uint32_t rtp_pps = (now_rtp - last_rtp) * 1000UL / dt_ms;
-                uint32_t fwd_pps = (now_fwd - last_fwd) * 1000UL / dt_ms;
-                ESP_LOGI("eth_hook", "ALL=%lu/s RTP=%lu/s fwd=%lu/s",
-                         (unsigned long)total_fps,
-                         (unsigned long)rtp_pps,
-                         (unsigned long)fwd_pps);
-            }
-        }
-        last_total = now_total;
-        last_rtp = now_rtp;
-        last_fwd = now_fwd;
-        last_tick = now_tick;
     }
 }

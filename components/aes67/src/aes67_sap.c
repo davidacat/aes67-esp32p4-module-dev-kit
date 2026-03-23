@@ -28,8 +28,8 @@ static const char *TAG = "aes67_sap";
 #define SAP_CONTENT_TYPE_LEN 16  /* includes null terminator */
 #define SAP_ANNOUNCE_FLAG    0x20
 #define SAP_DELETE_FLAG      0x24
-#define SAP_TX_INTERVAL_MS   30000
-#define SAP_TIMEOUT_MS       300000
+#define SAP_TX_INTERVAL_MS   2000    /* Announce every 2s for fast discovery */
+#define SAP_TIMEOUT_MS       10000   /* Expire remote sources after 10s silence */
 #define SAP_RX_BUF_SIZE      1500
 #define SAP_MAX_LOCAL         8
 #define SAP_MAX_REMOTE        16

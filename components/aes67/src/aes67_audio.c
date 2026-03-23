@@ -24,11 +24,11 @@ static const char *TAG = "aes67_audio";
 
 /* Kept for future capture (RX) task */
 
-/* I2S DMA: N descriptors at 48 frames (1ms) each.
- * DMA ring latency = (N-1) ms. Lower = less latency, less jitter margin.
- * 2 desc = 1ms latency (~2.7ms total path) -- absolute minimum */
+/* I2S DMA: 2 descriptors at 16 frames (0.33ms) each.
+ * ISR fires at 3000Hz. DMA ring latency = 0.33ms.
+ * Total path latency ~1.0ms with 0.33ms ptime source. */
 #define DMA_DESC_NUM            2
-#define DMA_FRAME_NUM           48
+#define DMA_FRAME_NUM           16
 
 
 struct aes67_audio_ctx {

@@ -645,26 +645,31 @@ esp_err_t aes67_rtp_engine_init(const aes67_net_config_t *net_config,
     uint32_t sbuf_size = practical_max_pkt * 8;
     engine->audio_stream_buf = xStreamBufferCreate(sbuf_size, practical_max_pkt);
 
-    /* Raw lwIP UDP PCB -- bypasses socket layer for RTP receive.
-     * Processes packets directly in lwIP callback context. */
+    /* Raw lwIP UDP PCB disabled when Ethernet hook is active.
+     * The hook intercepts RTP at L2 before lwIP, so the raw PCB would
+     * either see nothing (packets freed by hook) or duplicate-process
+     * packets that slip through, wasting CPU and memory.
+     * The raw PCB is only useful as fallback when the hook is not installed. */
+#if 0  /* Disabled: Ethernet hook handles RTP reception */
     engine->raw_pcb = udp_new();
     if (engine->raw_pcb) {
         err_t err = udp_bind(engine->raw_pcb, IP_ADDR_ANY, net_config->rtp_port);
         if (err == ERR_OK) {
             udp_recv(engine->raw_pcb, raw_udp_recv_cb, engine);
-            ESP_LOGI(TAG, "Raw UDP PCB bound to port %u (bypasses socket layer)",
-                     net_config->rtp_port);
+            ESP_LOGI(TAG, "Raw UDP PCB bound to port %u", net_config->rtp_port);
         } else {
-            ESP_LOGW(TAG, "Raw UDP bind failed: %d, falling back to socket", err);
             udp_remove(engine->raw_pcb);
             engine->raw_pcb = NULL;
         }
     }
-
-    /* Pre-allocate conversion buffer for the raw callback */
     engine->raw_sample_buf = heap_caps_malloc(
         CONFIG_AES67_MAX_CHANNELS_PER_STREAM * 192 * sizeof(int32_t),
         MALLOC_CAP_INTERNAL);
+#else
+    engine->raw_pcb = NULL;
+    engine->raw_sample_buf = NULL;
+    ESP_LOGI(TAG, "Raw UDP PCB disabled (Ethernet hook handles RTP)");
+#endif
     if (!engine->audio_stream_buf) {
         ESP_LOGE(TAG, "Failed to create audio stream buffer");
     }

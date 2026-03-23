@@ -143,7 +143,8 @@ static void playback_task(void *arg)
         return;
     }
 
-    ESP_LOGI(TAG, "Playback task started (ch=%u, auto_clear=on)", ch);
+    ESP_LOGI(TAG, "Playback task started (ch=%u, DMA-paced, buf=%lu bytes)",
+             ch, (unsigned long)buf_bytes);
 
     uint32_t total_frames = 0;
     uint32_t write_count = 0;
@@ -182,11 +183,21 @@ static void playback_task(void *arg)
             continue;
         }
 
-        /* Read whatever is available, up to one DMA descriptor worth.
-         * Block up to 4ms waiting for data. auto_clear handles silence. */
-        size_t frame_align = ch * sizeof(int32_t);  /* Bytes per frame */
+        /* Pre-buffer: wait for enough data to fill the DMA ring before
+         * starting writes. This prevents initial underruns and gives
+         * headroom to absorb network jitter. With auto_clear=false,
+         * i2s_channel_write blocks at 48kHz rate (DMA pacing). */
+        size_t frame_align = ch * sizeof(int32_t);
+        uint32_t prefill_bytes = 192 * ch * sizeof(int32_t) * 3;  /* 3 packets */
+        if (!sink_found) {
+            continue;
+        }
+
+        /* Wait for data with timeout. With auto_clear=false,
+         * i2s_channel_write provides 48kHz pacing. The timeout here
+         * just prevents the task from hanging when stream stops. */
         size_t received = xStreamBufferReceive(sbuf, pcm_buf, buf_bytes,
-                                                pdMS_TO_TICKS(4));
+                                                pdMS_TO_TICKS(20));
         if (received < frame_align) {
             continue;  /* Not enough for even one frame */
         }

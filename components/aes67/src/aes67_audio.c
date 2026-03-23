@@ -307,7 +307,10 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
     chan_cfg.dma_frame_num = DMA_FRAME_NUM;
-    chan_cfg.auto_clear = true;    /* Output silence when DMA not fed */
+    chan_cfg.auto_clear = false;   /* DMA pacing: i2s_channel_write blocks until
+                                    * descriptor consumed at 48kHz. With true,
+                                    * descriptors recycle instantly and writes
+                                    * never block, losing DMA clock recovery. */
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {
@@ -446,7 +449,7 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
     extern void aes67_audio_read_clock_divider(aes67_audio_handle_t h);
     aes67_audio_read_clock_divider(handle);
 
-    ESP_LOGI(TAG, "Audio started (DMA: %d desc x %d frames, auto_clear=on)",
+    ESP_LOGI(TAG, "Audio started (DMA: %d desc x %d frames, DMA-paced)",
              DMA_DESC_NUM, DMA_FRAME_NUM);
     return ESP_OK;
 }

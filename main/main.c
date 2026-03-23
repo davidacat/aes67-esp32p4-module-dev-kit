@@ -525,11 +525,11 @@ void app_main(void)
     ESP_ERROR_CHECK(aes67_node_start(node));
 
     /* Create stream buffer for Ethernet hook -> playback task path.
-     * Size for ~40ms of buffering at max packet size (192 frames stereo int32).
-     * Trigger at 1 byte for low latency - playback task handles framing. */
+     * 30 packets (~120ms at 4ms ptime) absorbs network jitter.
+     * Trigger at one full packet so playback task wakes on complete frames. */
     {
-        uint32_t max_pkt = 192 * aes67_cfg.audio.channels * sizeof(int32_t);
-        s_hook_sbuf = xStreamBufferCreate(max_pkt * 10, 1);
+        uint32_t pkt_bytes = 192 * aes67_cfg.audio.channels * sizeof(int32_t);
+        s_hook_sbuf = xStreamBufferCreate(pkt_bytes * 30, pkt_bytes);
     }
 
     /* Set up the Ethernet hook's I2S channel (for stats, not direct write) */

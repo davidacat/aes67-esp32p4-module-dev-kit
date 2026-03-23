@@ -520,26 +520,26 @@ void app_main(void)
     aes67_node_handle_t node = NULL;
     ESP_ERROR_CHECK(aes67_node_init(&aes67_cfg, &node));
 
-    /* Start PTP sync, RTP engine, SAP announcements and audio I/O.
-     * This enables I2S which starts MCLK generation. */
-    ESP_ERROR_CHECK(aes67_node_start(node));
-
-    /* Create stream buffer for Ethernet hook -> playback task path.
-     * 30 packets (~120ms at 4ms ptime) absorbs network jitter.
-     * Trigger at 1 byte: playback task uses two-stage read to batch
-     * multiple packets per i2s_channel_write call. */
+    /* Create stream buffer BEFORE starting the node. The DMA ISR callback
+     * reads directly from this buffer, bypassing the playback task.
+     * 30 packets (~120ms at 4ms ptime) for jitter absorption.
+     * Trigger=1: ISR always reads whatever is available. */
     {
         uint32_t pkt_bytes = 192 * aes67_cfg.audio.channels * sizeof(int32_t);
         s_hook_sbuf = xStreamBufferCreate(pkt_bytes * 30, 1);
-    }
 
-    /* Set up the Ethernet hook's I2S channel (for stats, not direct write) */
-    {
+        /* Wire the stream buffer to the audio driver's DMA ISR */
         aes67_audio_handle_t audio = NULL;
         aes67_node_get_audio(node, &audio);
+        aes67_audio_set_isr_stream_buf(audio, s_hook_sbuf);
         s_hook_tx_chan = aes67_audio_get_tx_chan(audio);
-        ESP_LOGI(TAG, "Ethernet hook -> stream buffer -> playback task");
+        ESP_LOGI(TAG, "Ethernet hook -> stream buffer -> DMA ISR (zero-overhead)");
     }
+
+    /* Start PTP sync, RTP engine, SAP announcements and audio I/O.
+     * This enables I2S which starts MCLK generation. The DMA ISR
+     * callback is registered during audio start. */
+    ESP_ERROR_CHECK(aes67_node_start(node));
 
     /* Initialize ES8311 codec AFTER I2S is running (MCLK must be active).
      * This is the critical init order discovered through testing. */

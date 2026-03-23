@@ -171,14 +171,52 @@ static void playback_ring_to_dma(struct aes67_audio_ctx *ctx,
     ctx->playback_rd = rd;
 }
 
-/* --- DMA callback --------------------------------------------------------- */
+/* --- DMA callbacks -------------------------------------------------------- */
 
-/* ISR callback: fires when a DMA descriptor finishes playing.
- * Copies data from the staging ring buffer directly into the DMA
- * buffer (event->dma_buf). This completely bypasses i2s_channel_write
- * and its per-call overhead (semaphore, queue, cache sync).
- *
- * Then notifies the playback task to refill the staging buffer. */
+/* Stream buffer fed by the Ethernet hook. The DMA ISR reads from this
+ * directly, bypassing the playback task entirely for zero overhead. */
+static StreamBufferHandle_t s_isr_stream_buf = NULL;
+
+/* ISR callback: fires when a DMA descriptor finishes playing (every 4ms).
+ * Reads int32 audio data directly from the stream buffer into the DMA
+ * descriptor. If no data is available, writes silence. This completely
+ * bypasses i2s_channel_write and the playback task, eliminating all
+ * task scheduling overhead that caused the 10% throughput loss. */
+static IRAM_ATTR bool on_i2s_tx_sent_sbuf(i2s_chan_handle_t handle,
+                                            i2s_event_data_t *event,
+                                            void *user_ctx)
+{
+    BaseType_t woken = pdFALSE;
+
+    if (s_isr_stream_buf) {
+        size_t received = xStreamBufferReceiveFromISR(s_isr_stream_buf,
+                                                       event->dma_buf,
+                                                       event->size,
+                                                       &woken);
+        /* Silence-fill any remaining bytes */
+        if (received < event->size) {
+            memset((uint8_t *)event->dma_buf + received, 0,
+                   event->size - received);
+        }
+    } else {
+        memset(event->dma_buf, 0, event->size);
+    }
+
+    /* Flush CPU cache so DMA sees the new data (ESP32-P4 L1 cache) */
+    esp_cache_msync(event->dma_buf, event->size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
+    return woken == pdTRUE;
+}
+
+/* Set the stream buffer for ISR-driven playback */
+void aes67_audio_set_isr_stream_buf(aes67_audio_handle_t handle,
+                                     StreamBufferHandle_t sbuf)
+{
+    (void)handle;
+    s_isr_stream_buf = sbuf;
+}
+
+/* Legacy staging ISR (unused, kept for reference) */
 __attribute__((unused))
 static IRAM_ATTR bool on_i2s_tx_sent(i2s_chan_handle_t handle,
                                       i2s_event_data_t *event,
@@ -307,10 +345,10 @@ esp_err_t aes67_audio_init(const aes67_audio_config_t *audio_config,
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = DMA_DESC_NUM;
     chan_cfg.dma_frame_num = DMA_FRAME_NUM;
-    chan_cfg.auto_clear = false;   /* DMA pacing: i2s_channel_write blocks until
-                                    * descriptor consumed at 48kHz. With true,
-                                    * descriptors recycle instantly and writes
-                                    * never block, losing DMA clock recovery. */
+    /* When using ISR callback, auto_clear doesn't matter because the ISR
+     * fills every descriptor (with data or silence). Set false for
+     * i2s_channel_write compatibility in non-ISR modes. */
+    chan_cfg.auto_clear = (s_isr_stream_buf != NULL);
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &ctx->tx_chan, &ctx->rx_chan);
     if (ret != ESP_OK) {
@@ -425,8 +463,24 @@ esp_err_t aes67_audio_start(aes67_audio_handle_t handle)
         return ESP_OK;
     }
 
-    /* DMA ISR callback disabled -- we write directly via i2s_channel_write
-     * from the RTP RX task (once per packet, ~33us overhead). */
+    /* Register DMA ISR callback for direct stream buffer -> DMA transfer.
+     * This bypasses i2s_channel_write and the playback task entirely. */
+    if (s_isr_stream_buf) {
+        i2s_event_callbacks_t cbs = {
+            .on_recv = NULL,
+            .on_recv_q_ovf = NULL,
+            .on_sent = on_i2s_tx_sent_sbuf,
+            .on_send_q_ovf = NULL,
+        };
+        esp_err_t cb_ret = i2s_channel_register_event_callback(
+            handle->tx_chan, &cbs, handle);
+        if (cb_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to register DMA ISR callback: %s",
+                     esp_err_to_name(cb_ret));
+        } else {
+            ESP_LOGI(TAG, "DMA ISR callback registered (zero-overhead playback)");
+        }
+    }
 
     /* Enable both TX and RX channels. The ES8311 codec requires both
      * to be active (matching the official ESP-IDF es8311 example). */

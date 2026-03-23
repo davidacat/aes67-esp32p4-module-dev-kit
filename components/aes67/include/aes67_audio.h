@@ -131,6 +131,15 @@ void aes67_audio_get_staging_stats(aes67_audio_handle_t handle,
                                     uint32_t *isr_count, uint32_t *underruns);
 
 /**
+ * Set the stream buffer for ISR-driven playback. The DMA ISR reads
+ * directly from this buffer, bypassing i2s_channel_write and the
+ * playback task. Must be called BEFORE aes67_audio_start().
+ */
+#include "freertos/stream_buffer.h"
+void aes67_audio_set_isr_stream_buf(aes67_audio_handle_t handle,
+                                     StreamBufferHandle_t sbuf);
+
+/**
  * Adjust the I2S TX MCLK divider for adaptive clock recovery.
  * ppm_adj: parts-per-million adjustment. +100 = 0.01% faster.
  */

@@ -458,19 +458,17 @@ esp_err_t aes67_node_start(aes67_node_handle_t handle)
     aes67_rtp_engine_set_playback(handle->rtp, handle->audio);
     ESP_LOGI(TAG, "Direct RTP->I2S path enabled (zero-buffer)");
 
-    /* Start dedicated playback task AFTER running=true */
-    {
+    /* Playback task: only needed for callback/stream_buffer output modes.
+     * For I2S mode, the DMA ISR reads directly from the stream buffer,
+     * bypassing the playback task entirely (zero scheduling overhead). */
+    if (handle->config.output_mode != AES67_OUTPUT_I2S) {
         static TaskHandle_t pb_task = NULL;
-        /* Playback on core 1 at priority 20 (below lwIP 22, above RX 17).
-         * lwIP processes packets first, then playback drains the jitter
-         * buffer, then RX picks up from the socket. */
-        /* Playback on core 1 at priority 21 (above RTP RX 17, below lwIP 22).
-         * Was on core 0 where TIC task (prio 21) preempted it every 1ms. */
         xTaskCreatePinnedToCore(playback_task, "aes67_pb", 8192, handle,
                                 21, &pb_task, 1);
-
-        /* Register playback task for notification from RTP RX */
         aes67_rtp_engine_set_notify_task(handle->rtp, pb_task);
+        ESP_LOGI(TAG, "Playback task started (output_mode=%d)", handle->config.output_mode);
+    } else {
+        ESP_LOGI(TAG, "I2S output via DMA ISR (no playback task needed)");
     }
 
     /* Start the hardware PTP frame timer and audio frame task.

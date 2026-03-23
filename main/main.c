@@ -109,7 +109,7 @@ static const char *TAG = "main";
 #define I2S_SCLK_GPIO       36   /* BCLK -> external DAC */
 #define I2S_LRCK_GPIO       33   /* LRCLK -> external DAC */
 #define I2S_DOUT_GPIO       32   /* Data out -> external DAC */
-#define I2S_DIN_GPIO        11   /* Not used with external DAC */
+#define I2S_DIN_GPIO        21   /* Data in <- external ADC */
 /* Onboard ES8311 pins (restore for built-in codec):
  * #define I2S_SCLK_GPIO    12
  * #define I2S_LRCK_GPIO    10

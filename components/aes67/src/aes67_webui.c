@@ -84,6 +84,14 @@ static esp_err_t handler_index(httpd_req_t *req)
     return httpd_resp_send(req, (const char *)index_html_gz_start, len);
 }
 
+/* ---- GET /favicon.ico : empty response to prevent 404 socket waste ---- */
+
+static esp_err_t handler_favicon(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, NULL, 0);
+}
+
 /* ---- GET /api/info ---- */
 
 static esp_err_t handler_api_info(httpd_req_t *req)
@@ -795,10 +803,10 @@ esp_err_t aes67_webui_start(aes67_webui_handle_t handle)
     /* Configure and start the HTTP server */
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = handle->port;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 16;
     config.stack_size = 8192;
     config.lru_purge_enable = true;
-    config.max_open_sockets = 4;
+    config.max_open_sockets = 7;
     config.core_id = 1;  /* Run HTTP server on core 1 (audio on core 0) */
 
     esp_err_t ret = httpd_start(&handle->httpd, &config);
@@ -817,6 +825,15 @@ esp_err_t aes67_webui_start(aes67_webui_handle_t handle)
         .user_ctx = handle,
     };
     httpd_register_uri_handler(handle->httpd, &uri_index);
+
+    /* Favicon -- prevent browser 404 and socket waste */
+    const httpd_uri_t uri_favicon = {
+        .uri = "/favicon.ico",
+        .method = HTTP_GET,
+        .handler = handler_favicon,
+        .user_ctx = handle,
+    };
+    httpd_register_uri_handler(handle->httpd, &uri_favicon);
 
     /* WebSocket endpoint */
     const httpd_uri_t uri_ws = {

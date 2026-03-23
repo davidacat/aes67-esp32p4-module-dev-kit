@@ -73,7 +73,22 @@ static void sap_discovery_cb(bool is_announce,
         if (aes67_session_get_sink(s_session, sink_id, &sink) == ESP_OK) {
             s_hook_word_length = sink.rtp_config.word_length;
             s_hook_channels = sink.rtp_config.channels;
-            ESP_LOGI("main", "Hook: wl=%u ch=%u", s_hook_word_length, s_hook_channels);
+            ESP_LOGI("main", "Hook: wl=%u ch=%u rate=%lu ptime=%u",
+                     s_hook_word_length, s_hook_channels,
+                     (unsigned long)sink.rtp_config.sample_rate,
+                     sink.rtp_config.packet_time_us);
+
+            /* Create a matching source stream with same codec/rate/channels
+             * as the discovered sink, so both directions are symmetric. */
+            aes67_codec_t src_codec = sink.rtp_config.codec;
+            uint8_t src_ch = sink.rtp_config.channels;
+            uint8_t src_id = 0;
+            esp_err_t src_err = aes67_session_add_source(
+                s_session, "ESP32-P4 AES67", src_ch, src_codec, &src_id);
+            if (src_err == ESP_OK) {
+                ESP_LOGI("main", "Source matched to sink: %uch %s",
+                         src_ch, aes67_codec_to_str(src_codec));
+            }
         }
         ESP_LOGI("main", "Sink added (id=%u) -- receiving \"%s\"",
                  sink_id, source->name);
@@ -618,40 +633,8 @@ void app_main(void)
         }
     }
 
-    /* Source stream disabled while raw UDP PCB occupies port 5004.
-     * TODO: use separate ports for TX and RX, or share the raw PCB. */
-    uint8_t source_id = 0;
-    esp_err_t src_err = aes67_session_add_source(session, "ESP32-P4 AES67",
-                                                   2, AES67_CODEC_L24, &source_id);
-    if (src_err == ESP_OK) {
-        ESP_LOGI(TAG, "AES67 source stream active (id=%u, 2ch L24 @ 48kHz)", source_id);
-    } else {
-        ESP_LOGW(TAG, "Source stream skipped (port conflict with raw PCB): %s",
-                 esp_err_to_name(src_err));
-    }
-
-    aes67_source_t src_info;
-    aes67_session_get_source(session, source_id, &src_info);
-
-    const uint32_t samples_per_packet = 48; /* 48kHz * 1ms */
-
-    /* Use esp-dsp tone generator to precompute one full period of
-     * a 1kHz sine wave at 48kHz into a float buffer, then convert
-     * to 24-bit int32 once. The LUT is only 48 samples. */
-    const uint32_t tone_period = 48; /* 48000 / 1000 */
-    float tone_float[tone_period];
-    dsps_tone_gen_f32(tone_float, tone_period, 0.5f,
-                      1000.0f / 48000.0f, 0.0f);
-
-    /* Convert float LUT to 24-bit left-justified int32 */
-    int32_t sine_lut[tone_period];
-    for (uint32_t n = 0; n < tone_period; n++) {
-        sine_lut[n] = (int32_t)(tone_float[n] * 8388607.0f) << 8;
-    }
-
-    /* Stereo interleaved buffer for one packet */
-    int32_t tone_buf[samples_per_packet * 2];
-    uint32_t phase = 0;
+    /* Source stream is created in the SAP callback to match the
+     * discovered sink's codec and channel count. */
 
     /* Start the WebUI (HTTP + WebSocket) on port 80 */
     #include "aes67_webui.h"

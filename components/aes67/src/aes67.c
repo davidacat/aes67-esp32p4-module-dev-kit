@@ -130,10 +130,11 @@ static void playback_task(void *arg)
     aes67_node_handle_t node = (aes67_node_handle_t)arg;
     const uint8_t ch = node->config.audio.channels;
 
-    /* Playback buffer: holds up to 192 frames (4ms at 48kHz, AES67 max).
-     * Reads whatever is available from the stream buffer and writes to I2S.
-     * auto_clear=true ensures silence when not fed. */
-    const uint32_t max_frames = 192;
+    /* Playback buffer: holds up to 768 frames (16ms at 48kHz = 4 DMA descriptors).
+     * Reading multiple packets per i2s_channel_write call amortizes the ~0.4ms
+     * overhead of xStreamBufferReceive + context switches. Without this, the
+     * per-iteration overhead causes ~10% throughput loss. */
+    const uint32_t max_frames = 768;
     const uint32_t buf_bytes = max_frames * ch * sizeof(int32_t);
     int32_t *pcm_buf = heap_caps_malloc(buf_bytes, MALLOC_CAP_INTERNAL);
     if (!pcm_buf) {

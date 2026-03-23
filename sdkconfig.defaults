@@ -77,6 +77,9 @@ CONFIG_PM_ENABLE=n
 # Disable WiFi (Ethernet only, saves resources and avoids interference)
 CONFIG_ESP_WIFI_ENABLED=n
 
+# Disable IPv6 (saves ~39KB flash, 2KB RAM, reduces packet processing)
+CONFIG_LWIP_IPV6=n
+
 # Flash
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_SPI_FLASH_SUPPORT_GD_CHIP=y

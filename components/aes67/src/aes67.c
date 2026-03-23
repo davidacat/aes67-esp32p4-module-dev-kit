@@ -195,11 +195,23 @@ static void playback_task(void *arg)
 
         /* Wait for data with timeout. With auto_clear=false,
          * i2s_channel_write provides 48kHz pacing. The timeout here
-         * just prevents the task from hanging when stream stops. */
+         * detects stream stop and flushes silence to avoid replay. */
         size_t received = xStreamBufferReceive(sbuf, pcm_buf, buf_bytes,
                                                 pdMS_TO_TICKS(20));
         if (received < frame_align) {
-            continue;  /* Not enough for even one frame */
+            /* No data: write silence to flush DMA ring.
+             * With auto_clear=false, old data replays forever unless
+             * we explicitly push zeros through all DMA descriptors. */
+            i2s_chan_handle_t tx = aes67_audio_get_tx_chan(node->audio);
+            if (tx && node->config.output_mode == AES67_OUTPUT_I2S) {
+                memset(pcm_buf, 0, buf_bytes);
+                for (int d = 0; d < 4; d++) {  /* Flush all DMA descriptors */
+                    size_t written = 0;
+                    i2s_channel_write(tx, pcm_buf, 192 * frame_align,
+                                      &written, pdMS_TO_TICKS(10));
+                }
+            }
+            continue;
         }
 
         /* Align to frame boundary */

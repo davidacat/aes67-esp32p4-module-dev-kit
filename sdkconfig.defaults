@@ -68,6 +68,9 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 
+# Performance optimization (-O2, critical for real-time audio paths)
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
 # Disable power management (real-time audio needs consistent performance)
 CONFIG_PM_ENABLE=n
 

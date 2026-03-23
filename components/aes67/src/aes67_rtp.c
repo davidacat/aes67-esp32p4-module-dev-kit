@@ -48,6 +48,7 @@ typedef struct {
 /* Internal stream structure */
 struct aes67_rtp_stream {
     aes67_rtp_stream_config_t config;
+    aes67_stream_params_t params;       /* Computed stream parameters */
     aes67_stream_dir_t direction;
     int tx_sock;
     struct sockaddr_in dest_addr;
@@ -62,6 +63,10 @@ struct aes67_rtp_stream {
     uint8_t *tx_packet_buf;     /* Scratch buffer for packet assembly (internal SRAM) */
     bool active;
     bool first_packet;          /* True until first RTP packet received (sinks) */
+    /* Codec conversion function pointers (MTConvert pattern).
+     * Resolved once at stream creation, called per-packet with no branching. */
+    aes67_convert_to_net_fn convert_to_net;
+    aes67_convert_from_net_fn convert_from_net;
     /* Jitter measurement for RX */
     int64_t last_rx_time_us;    /* Timestamp of last received packet in microseconds */
     int32_t jitter_us;          /* Estimated inter-packet jitter in microseconds */
@@ -202,12 +207,6 @@ static bool rtp_parse_header(const uint8_t *buf, size_t len,
 }
 
 /* --- Stream allocation helpers --- */
-
-static uint32_t compute_samples_per_packet(uint32_t sample_rate,
-                                           uint16_t packet_time_us)
-{
-    return (sample_rate * (uint32_t)packet_time_us) / 1000000;
-}
 
 static esp_err_t stream_alloc_buffers(struct aes67_rtp_stream *stream,
                                       bool use_psram)
@@ -386,7 +385,7 @@ static void raw_udp_recv_cb(void *arg, struct udp_pcb *pcb,
     if (frames > AES67_MAX_TIC_FRAMES) frames = AES67_MAX_TIC_FRAMES;
 
     int32_t *sample_buf = engine->raw_sample_buf;
-    aes67_convert_from_net(payload, sample_buf, frames, channels, wl);
+    stream->convert_from_net(payload, sample_buf, frames, channels);
 
     /* Write converted int32 samples to stream buffer for playback */
     if (engine->audio_stream_buf) {
@@ -569,11 +568,8 @@ static void rx_task_func(void *arg)
                               AES67_MAX_TIC_FRAMES / channels;
         if (frames > max_frames) frames = max_frames;
 
-        aes67_convert_from_net(payload, sample_buf, frames, channels, wl);
+        stream->convert_from_net(payload, sample_buf, frames, channels);
 
-        /* Direct I2S write with DMA prefill. Buffer the first 3 packets
-         * (12ms) to fill the DMA ring, then write each packet as it
-         * arrives. The DMA stays ~12ms ahead, absorbing network jitter. */
         /* Route converted int32 samples to stream buffer or jitter buffer */
         if (engine->audio_stream_buf) {
             xStreamBufferSend(engine->audio_stream_buf, sample_buf,
@@ -853,14 +849,24 @@ esp_err_t aes67_rtp_stream_add(aes67_rtp_engine_handle_t engine_handle,
     s->first_packet = true;
     memset(&s->status, 0, sizeof(s->status));
 
-    /* Compute packet dimensions */
-    s->samples_per_packet = compute_samples_per_packet(config->sample_rate,
-                                                       config->packet_time_us);
-    s->packet_payload_size = s->samples_per_packet * config->channels *
-                             config->word_length;
+    /* Compute all derived stream parameters from base config */
+    aes67_stream_params_compute(&s->params,
+                                config->sample_rate,
+                                config->channels,
+                                config->word_length,
+                                config->packet_time_us);
+    s->samples_per_packet = s->params.samples_per_packet;
+    s->packet_payload_size = s->params.packet_payload_size;
 
-    ESP_LOGD(TAG, "Stream: %u samples/packet, %lu bytes payload",
-             s->samples_per_packet, (unsigned long)s->packet_payload_size);
+    /* Resolve codec conversion function pointers (MTConvert pattern).
+     * This avoids branching on word_length in the per-packet hot path. */
+    s->convert_to_net = aes67_get_to_net_fn(config->word_length);
+    s->convert_from_net = aes67_get_from_net_fn(config->word_length);
+
+    ESP_LOGD(TAG, "Stream: spp=%lu, payload=%lu, native=%lu bytes",
+             (unsigned long)s->params.samples_per_packet,
+             (unsigned long)s->params.packet_payload_size,
+             (unsigned long)s->params.packet_native_size);
 
     /* Allocate ring and scratch buffers */
     esp_err_t err = stream_alloc_buffers(s, engine->use_psram);
@@ -1130,8 +1136,7 @@ esp_err_t aes67_rtp_engine_process_tx(aes67_rtp_engine_handle_t handle,
             }
 
             /* Convert int32_t native samples to packed big-endian wire format */
-            aes67_convert_to_net(sample_buf, payload_ptr,
-                                 batch, channels, wl);
+            s->convert_to_net(sample_buf, payload_ptr, batch, channels);
 
             payload_ptr += batch * channels * wl;
             frames_done += batch;

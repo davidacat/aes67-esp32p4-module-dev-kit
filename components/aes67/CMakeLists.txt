@@ -12,6 +12,7 @@ idf_component_register(
         "src/aes67_mdns.c"
         "src/aes67_hw_timer.c"
         "src/aes67_l2tap_rx.c"
+        "src/aes67_webui.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS
@@ -26,6 +27,16 @@ idf_component_register(
         esp_psram
         ptpd
         esp_eth_time
-        esp_netif
         esp_mm
+        esp_http_server
+    EMBED_FILES
+        "web/index.html.gz"
+)
+
+# Gzip the web frontend for embedding in flash
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/web/index.html.gz
+    COMMAND gzip -9 -k -f ${CMAKE_CURRENT_SOURCE_DIR}/web/index.html
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/web/index.html
+    COMMENT "Compressing web/index.html -> index.html.gz"
 )

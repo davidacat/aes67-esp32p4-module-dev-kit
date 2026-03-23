@@ -661,31 +661,19 @@ void app_main(void)
     int32_t tone_buf[samples_per_packet * 2];
     uint32_t phase = 0;
 
+    /* Start the WebUI (HTTP + WebSocket) on port 80 */
+    #include "aes67_webui.h"
+    aes67_webui_handle_t webui = NULL;
+    if (aes67_webui_init(node, 80, &webui) == ESP_OK) {
+        aes67_webui_start(webui);
+    }
+
     ESP_LOGI(TAG, "node ready");
 
-    /* Monitor loop: ISR health + task stats */
+    /* Monitor loop: ISR health only */
     extern void aes67_audio_log_isr_stats(void);
-    uint32_t stats_count = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         aes67_audio_log_isr_stats();
-
-        /* Print FreeRTOS task stats every 5 iterations (~10s) */
-        stats_count++;
-        if ((stats_count % 5) == 0) {
-            static char stats_buf[1024];
-#if configGENERATE_RUN_TIME_STATS && configUSE_TRACE_FACILITY
-            vTaskGetRunTimeStats(stats_buf);
-            ESP_LOGI(TAG, "Task CPU%%:\n%s", stats_buf);
-#elif configUSE_TRACE_FACILITY
-            vTaskList(stats_buf);
-            ESP_LOGI(TAG, "Tasks:\n%s", stats_buf);
-#else
-            /* Minimal: just show free heap */
-            ESP_LOGI(TAG, "Free heap: %lu, min: %lu",
-                     (unsigned long)esp_get_free_heap_size(),
-                     (unsigned long)esp_get_minimum_free_heap_size());
-#endif
-        }
     }
 }

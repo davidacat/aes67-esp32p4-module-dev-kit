@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AES67 Node</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;color:#ccc;font:13px/1.5 'JetBrains Mono','Fira Code',Consolas,monospace}
+a{color:#e8a030}
+.wrap{max-width:1100px;margin:0 auto;padding:8px 12px}
+header{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #333;margin-bottom:12px}
+header h1{font-size:16px;color:#e8a030;font-weight:600}
+header .meta{font-size:11px;color:#888;text-align:right}
+.card{background:#1a1a1a;border:1px solid #282828;border-radius:4px;padding:10px 14px;margin-bottom:10px}
+.card h2{font-size:12px;color:#e8a030;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.row{display:flex;flex-wrap:wrap;gap:6px 18px}
+.row span{white-space:nowrap}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stream{background:#222;border:1px solid #2a2a2a;border-radius:3px;padding:8px 10px;margin-bottom:6px}
+.stream .sname{color:#e8a030;font-weight:600;font-size:12px}
+.stream .sinfo{font-size:11px;color:#999;margin-top:3px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
+.dot-g{background:#4a4}.dot-a{background:#e8a030}.dot-r{background:#c44}
+.lbl{color:#666;font-size:11px}
+.val{color:#ddd}
+#remotes-list .rentry{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #222}
+#remotes-list .rentry:last-child{border:none}
+.btn{background:#e8a030;color:#111;border:none;padding:3px 10px;border-radius:3px;font:11px/1.4 inherit;cursor:pointer}
+.btn:hover{background:#f0b040}
+.msub{display:flex;gap:8px;margin-top:6px}
+.msub input{flex:1;background:#222;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:3px;font:12px inherit}
+footer{border-top:1px solid #333;padding:8px 0;font-size:11px;color:#666;display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;margin-top:8px}
+@media(max-width:700px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<h1 id="devname">AES67 Node</h1>
+<div class="meta"><span id="ver">--</span><br><span id="ip">--</span></div>
+</header>
+
+<div class="card" id="ptp-card">
+<h2>PTP Status</h2>
+<div class="row">
+<span><span class="dot dot-r" id="ptp-dot"></span><span id="ptp-lock">--</span></span>
+<span><span class="lbl">GM </span><span class="val" id="ptp-gm">--</span></span>
+<span><span class="lbl">Offset </span><span class="val" id="ptp-off">--</span><span class="lbl"> ns</span></span>
+<span><span class="lbl">Jitter </span><span class="val" id="ptp-jit">--</span><span class="lbl"> ns</span></span>
+<span><span class="lbl">Delay </span><span class="val" id="ptp-del">--</span><span class="lbl"> ns</span></span>
+</div>
+</div>
+
+<div class="grid">
+<div class="card"><h2>Sources (TX)</h2><div id="sources">--</div></div>
+<div class="card"><h2>Sinks (RX)</h2><div id="sinks">--</div></div>
+</div>
+
+<div class="card">
+<h2>Network Discovery</h2>
+<div id="remotes-list"><span class="lbl">No remote sources discovered</span></div>
+</div>
+
+<div class="card">
+<h2>Manual Subscribe</h2>
+<div class="msub">
+<input id="sdp-in" placeholder="SDP URL or paste SDP text">
+<button class="btn" onclick="manualSub()">Subscribe</button>
+</div>
+</div>
+
+<footer>
+<span>Uptime: <span id="ft-up">--</span></span>
+<span>Heap: <span id="ft-heap">--</span></span>
+<span>RTP: <span id="ft-rtp">--</span> pps</span>
+<span>Pkts: <span id="ft-tot">--</span></span>
+<span>Lost: <span id="ft-lost">--</span></span>
+</footer>
+</div>
+
+<script>
+var ws,rto;
+var PTP_STATES=["No clock","Listening","Locked","Acquiring"];
+
+function fmt(n){return n!=null?Number(n).toLocaleString():"--"}
+
+function fmtUp(s){
+  if(s==null)return"--";
+  var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  return(d?d+"d ":"")+h+"h "+m+"m";
+}
+
+function el(id){return document.getElementById(id)}
+
+function dotClass(lock){return lock===2?"dot-g":lock===1||lock===3?"dot-a":"dot-r"}
+
+function renderStreams(arr,isSink){
+  if(!arr||!arr.length)return'<span class="lbl">None</span>';
+  var h="";
+  for(var i=0;i<arr.length;i++){
+    var s=arr[i];
+    h+='<div class="stream"><div class="sname">'+(s.enabled?'<span class="dot dot-g"></span>':'<span class="dot dot-r"></span>')+
+      esc(s.name)+'</div><div class="sinfo">'+esc(s.codec)+' / '+fmt(s.rate)+' Hz / '+s.ch+'ch / '+
+      (s.ptime/1000).toFixed(1)+'ms</div><div class="sinfo">'+(isSink?"RX":"TX")+": "+fmt(isSink?s.rx:s.tx)+" pkts";
+    if(isSink)h+=" | Lost: "+fmt(s.lost)+" | Jitter: "+fmt(s.jitter)+"\u00b5s";
+    h+="</div></div>";
+  }
+  return h;
+}
+
+function renderRemotes(arr){
+  if(!arr||!arr.length){el("remotes-list").innerHTML='<span class="lbl">No remote sources discovered</span>';return}
+  var h="";
+  for(var i=0;i<arr.length;i++){
+    var r=arr[i];
+    h+='<div class="rentry"><span>'+esc(r.name)+' <span class="lbl">('+esc(r.ip)+')</span></span>'+
+      '<button class="btn" onclick="subRemote(\''+esc(r.ip)+'\',\''+esc(r.name)+'\')">Subscribe</button></div>';
+  }
+  el("remotes-list").innerHTML=h;
+}
+
+function esc(s){return s?String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"):""}
+
+function onMsg(e){
+  var d;try{d=JSON.parse(e.data)}catch(x){return}
+  if(d.t!=="status")return;
+  /* PTP */
+  var p=d.ptp||{};
+  el("ptp-dot").className="dot "+dotClass(p.lock);
+  el("ptp-lock").textContent=PTP_STATES[p.lock]||"Unknown";
+  el("ptp-gm").textContent=p.gm||"--";
+  el("ptp-off").textContent=fmt(p.offset);
+  el("ptp-jit").textContent=fmt(p.jitter);
+  el("ptp-del").textContent=fmt(p.delay);
+  /* Streams */
+  el("sources").innerHTML=renderStreams(d.sources,false);
+  el("sinks").innerHTML=renderStreams(d.sinks,true);
+  /* Remotes */
+  renderRemotes(d.remotes);
+  /* Footer */
+  el("ft-up").textContent=fmtUp(d.uptime);
+  el("ft-heap").textContent=fmt(d.heap)+" B";
+  var eth=d.eth||{};
+  el("ft-rtp").textContent=fmt(eth.rtp_pps);
+  el("ft-tot").textContent=fmt(eth.total);
+  el("ft-lost").textContent=fmt(eth.seq_lost);
+}
+
+function wsConnect(){
+  var loc=location;
+  ws=new WebSocket((loc.protocol==="https:"?"wss://":"ws://")+loc.host+"/ws");
+  ws.onmessage=onMsg;
+  ws.onclose=function(){rto=setTimeout(wsConnect,2000)};
+  ws.onerror=function(){ws.close()};
+}
+
+function subRemote(ip,name){
+  fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name:name,ip:ip})});
+}
+
+function manualSub(){
+  var v=el("sdp-in").value.trim();
+  if(!v)return;
+  fetch("/api/sinks",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name:"Manual",sdp:v})}).then(function(r){if(r.ok)el("sdp-in").value=""});
+}
+
+/* Init: fetch device info then open WS */
+fetch("/api/info").then(function(r){return r.json()}).then(function(d){
+  if(d.name)el("devname").textContent=d.name;
+  if(d.version)el("ver").textContent="v"+d.version;
+  if(d.ip)el("ip").textContent=d.ip;
+}).catch(function(){});
+wsConnect();
+</script>
+</body>
+</html>

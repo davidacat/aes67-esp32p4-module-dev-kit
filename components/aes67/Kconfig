@@ -188,4 +188,17 @@ menu "AES67 RAVENNA Component"
             GPIO pin for I2S serial data input from codec ADC (ASDOUT).
             On ESP32-P4-NANO this is GPIO11.
 
+    config AES67_WEBUI_ENABLED
+        bool "Enable WebUI"
+        default y
+        help
+            HTTP REST API and WebSocket for monitoring and control.
+
+    config AES67_WEBUI_PORT
+        int "WebUI HTTP port"
+        default 80
+        depends on AES67_WEBUI_ENABLED
+        help
+            TCP port for the embedded web server.
+
 endmenu

@@ -90,6 +90,20 @@ esp_err_t aes67_node_get_audio(aes67_node_handle_t handle,
 esp_err_t aes67_node_get_sap(aes67_node_handle_t handle,
                               aes67_sap_handle_t *sap);
 
+/**
+ * Get the PTP handle from a running node.
+ */
+#include "aes67_ptp.h"
+esp_err_t aes67_node_get_ptp(aes67_node_handle_t handle,
+                              aes67_ptp_handle_t *ptp);
+
+/**
+ * Get the RTP engine handle from a running node.
+ */
+#include "aes67_rtp.h"
+esp_err_t aes67_node_get_rtp(aes67_node_handle_t handle,
+                              aes67_rtp_engine_handle_t *rtp);
+
 #ifdef __cplusplus
 }
 #endif

@@ -620,3 +620,25 @@ esp_err_t aes67_node_get_sap(aes67_node_handle_t handle,
     *sap = handle->sap;
     return ESP_OK;
 }
+
+esp_err_t aes67_node_get_ptp(aes67_node_handle_t handle,
+                              aes67_ptp_handle_t *ptp)
+{
+    if (!handle || !ptp) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *ptp = handle->ptp;
+    return ESP_OK;
+}
+
+esp_err_t aes67_node_get_rtp(aes67_node_handle_t handle,
+                              aes67_rtp_engine_handle_t *rtp)
+{
+    if (!handle || !rtp) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *rtp = handle->rtp;
+    return ESP_OK;
+}

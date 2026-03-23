@@ -28,8 +28,8 @@ header .meta{font-size:11px;color:#888;text-align:right}
 #remotes-list .rentry:last-child{border:none}
 .btn{background:#e8a030;color:#111;border:none;padding:3px 10px;border-radius:3px;font:11px/1.4 inherit;cursor:pointer}
 .btn:hover{background:#f0b040}
-.msub{display:flex;gap:8px;margin-top:6px}
-.msub input{flex:1;background:#222;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:3px;font:12px inherit}
+.msub{display:flex;gap:8px;margin-top:6px;align-items:flex-start}
+.msub textarea{flex:1;background:#222;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:3px;font:11px/1.4 inherit;resize:vertical;min-height:60px}
 footer{border-top:1px solid #333;padding:8px 0;font-size:11px;color:#666;display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;margin-top:8px}
 @media(max-width:700px){.grid{grid-template-columns:1fr}}
 </style>
@@ -65,7 +65,7 @@ footer{border-top:1px solid #333;padding:8px 0;font-size:11px;color:#666;display
 <div class="card">
 <h2>Manual Subscribe</h2>
 <div class="msub">
-<input id="sdp-in" placeholder="SDP URL or paste SDP text">
+<textarea id="sdp-in" placeholder="Paste SDP text here&#10;v=0&#10;o=- ..."></textarea>
 <button class="btn" onclick="manualSub()">Subscribe</button>
 </div>
 </div>

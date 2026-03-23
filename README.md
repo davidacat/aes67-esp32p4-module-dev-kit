@@ -2,24 +2,34 @@
 
 An ESP-IDF component implementing the AES67 (and RAVENNA-compatible) audio-over-IP standard on the ESP32-P4, based on patterns from the [aes67-linux-daemon](https://github.com/bondagit/aes67-linux-daemon) reference implementation.
 
+## Performance
+
+- **2.7ms end-to-end latency** (AES67 network to I2S output)
+- **100% DMA utilization** -- zero underruns at 1000 pps
+- **0 packet loss** with IEEE 802.3x flow control
+- Tested continuously at 100k+ packets with zero drops or sequence gaps
+
 ## Features
 
 - **PTP (IEEE 1588v2)** clock synchronization using ESP32-P4 EMAC hardware timestamping
   - Slave mode: synchronizes to an external PTP grandmaster
   - Grandmaster mode: becomes PTP GM when no other master is present
-  - Sub-microsecond lock detection with configurable thresholds
-- **RTP audio streaming** with per-stream jitter buffers
+  - PI controller with adaptive gain for fast lock and stable tracking
+- **RTP audio streaming** with ISR-driven DMA playback
   - Source (TX) and Sink (RX) streams
   - L16, L24, L32, AM824 codec support with MTConvert function pointer dispatch
-  - Dynamic TIC sizes: 48, 64, 96, 128, 192 up to 1024 frames
   - Channels: 1-8 per stream with channel routing support
-  - Sample rates: 44.1kHz, 48kHz (96kHz planned)
-  - Configurable packet time (125us to 4ms, default 1ms per AES67)
+  - Sample rates: 44.1kHz, 48kHz
+  - Packet time: 1ms to 4ms (48 to 192 frames)
   - DSCP/QoS marking for network prioritization
-  - Raw lwIP UDP PCB for minimal per-packet overhead (~10us)
-  - Ethernet MAC hook for zero-copy RTP interception
+  - Ethernet MAC hook for L2 RTP interception (bypasses lwIP entirely)
+  - IEEE 802.3x flow control prevents EMAC multicast frame drops
+- **ISR-driven playback** -- zero task scheduling overhead
+  - DMA ISR reads directly from stream buffer at 1000Hz
+  - Sample-hold on underrun (smooth decay, no silence clicks)
+  - 2 DMA descriptors at 48 frames = 1ms ring latency
 - **Flexible output routing** per node
-  - I2S direct output to codec (DMA-paced, default)
+  - I2S direct output to DAC (ISR-driven, default)
   - User callback with int32 sample buffers
   - FreeRTOS StreamBuffer for application-level processing
 - **SAP (RFC 2974)** session announcement and discovery
@@ -32,34 +42,48 @@ An ESP-IDF component implementing the AES67 (and RAVENNA-compatible) audio-over-
 - **mDNS/DNS-SD** service advertisement (`_ravenna._udp`)
 - **I2S audio** driver with APLL clock
   - Standard I2S Philips mode, 32-bit slots
-  - APLL for exact audio sample rates (18.432MHz MCLK)
-  - Adaptive clock recovery via APLL SDM registers (sub-ppm tuning)
-  - Ring buffers in PSRAM, DMA buffers in internal SRAM
-- **Performance optimizations**
+  - APLL for exact 48kHz (18.432MHz MCLK)
+  - Adaptive clock recovery via APLL SDM registers
+- **Optimized for real-time**
   - -O2 compiler optimization
-  - IRAM_ATTR on all hot-path conversion functions
-  - lwIP IRAM optimizations enabled
-  - Conversion function pointers resolved at stream creation (zero-branch hot path)
+  - IRAM on all hot-path conversion functions
+  - lwIP IRAM optimizations
+  - IPv6 disabled (saves 39KB flash, reduces packet processing)
+  - All tasks pinned to core 0 for cache coherency
+
+## Latency Breakdown
+
+| Stage | Time |
+|---|---|
+| Source ptime buffering | 1.0ms |
+| Network (LAN) | 0.1ms |
+| Ethernet L2 hook (parse + convert) | 0.1ms |
+| Stream buffer | 0.5ms |
+| DMA ring (2 descriptors) | 1.0ms |
+| **Total** | **~2.7ms** |
 
 ## Hardware
 
 The example targets the **ESP32-P4-NANO** board with:
 
-| Function | GPIO |
-|---|---|
-| Ethernet MDC | 31 |
-| Ethernet MDIO | 52 |
-| Ethernet REF_CLK | 50 |
-| Ethernet PHY_RST | 51 |
-| I2S MCLK | 13 |
-| I2S SCLK | 12 |
-| I2S LRCK | 10 |
-| I2S DOUT (ESP->codec) | 9 |
-| I2S DIN (codec->ESP) | 11 |
-| PA Enable | 53 |
+| Function | GPIO | Notes |
+|---|---|---|
+| Ethernet MDC | 31 | |
+| Ethernet MDIO | 52 | |
+| Ethernet REF_CLK | 50 | External 50MHz crystal |
+| Ethernet PHY_RST | 51 | |
+| I2S MCLK | 13 | 18.432MHz via APLL |
+| I2S BCLK | 36 | External DAC (onboard: 12) |
+| I2S LRCLK | 33 | External DAC (onboard: 10) |
+| I2S DOUT | 32 | External DAC (onboard: 9) |
+| I2S DIN | 11 | Codec ADC input |
+| PA Enable | 53 | Active high |
+| I2C SCL | 8 | ES8311 control |
+| I2C SDA | 7 | ES8311 control |
 
-Ethernet PHY: IP101 GRI via RMII, external 50MHz crystal.
-Audio codec: ES8311 via I2C + I2S, NS4150B power amplifier.
+- Ethernet PHY: IP101 GRI via RMII
+- Onboard audio codec: ES8311 + NS4150B amplifier
+- External I2S DAC supported (pin remapping in main.c)
 
 ## Build
 
@@ -83,17 +107,17 @@ components/aes67/
     aes67_sap.h         SAP announcement/discovery
     aes67_sdp.h         SDP parser/generator
     aes67_session.h     Session manager (sources/sinks)
-    aes67_audio.h       I2S audio driver with APLL
+    aes67_audio.h       I2S audio driver with APLL and ISR playback
     aes67_convert.h     Sample format conversion (MTConvert pattern)
     aes67_net.h         Network utilities
   src/
-    aes67.c             Node lifecycle, playback task, output routing
+    aes67.c             Node lifecycle and output routing
     aes67_ptp.c         PTP wrapping ptpd + esp_eth_time
-    aes67_rtp.c         RTP engine with ring buffers and raw UDP PCB
+    aes67_rtp.c         RTP engine with per-stream jitter buffers
     aes67_sap.c         SAP multicast announcements
     aes67_sdp.c         SDP text generation/parsing
     aes67_session.c     Stream orchestration
-    aes67_audio.c       I2S DMA driver with APLL clock recovery
+    aes67_audio.c       I2S DMA driver with ISR-driven playback
     aes67_convert.c     L16/L24/L32/AM824 format conversion (IRAM)
     aes67_net.c         Multicast socket helpers
     aes67_mdns.c        mDNS service registration
@@ -159,16 +183,27 @@ cfg.audio_cb_user_data = NULL;
 ## Data Flow
 
 ```
-Capture path:
-  ES8311 -> I2S RX DMA -> capture ring buffer -> RTP TX -> network
+Playback (ISR-driven, default):
+  Network -> Ethernet L2 hook -> convert L16/L24 to int32
+          -> StreamBuffer -> DMA ISR (1000Hz) -> I2S -> DAC
 
-Playback path (I2S mode):
-  network -> Ethernet hook -> stream buffer -> playback task -> I2S TX DMA -> ES8311
+  The DMA ISR fires every 1ms, reads 48 frames from the stream
+  buffer, and fills the DMA descriptor. Two descriptors alternate:
+  one plays while the other is filled. Total ring latency: 1ms.
 
-Playback path (Callback mode):
-  network -> RTP RX -> convert -> stream buffer -> playback task -> user callback
+Capture:
+  ADC -> I2S RX DMA -> capture ring buffer -> RTP TX -> network
 
 Timing:
   PTP clock -> hardware timer ISR -> audio frame task (TIC) -> RTP TX
   APLL clock -> I2S DMA -> 48kHz sample-accurate playback
 ```
+
+## Key Design Decisions
+
+- **Ethernet L2 hook** intercepts RTP packets before lwIP, avoiding all TCP/IP stack overhead
+- **ISR-driven playback** eliminates task scheduling jitter that caused 10% throughput loss
+- **IEEE 802.3x flow control** prevents the ESP32-P4 EMAC from dropping multicast frames under load
+- **Sample-hold on underrun** produces smooth decay instead of audible silence clicks
+- **StreamBuffer byte-stream** handles any packet time (1ms-4ms) transparently
+- **All tasks on core 0** avoids cross-core L1 cache visibility issues on ESP32-P4 dual RISC-V

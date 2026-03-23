@@ -44,6 +44,9 @@
 static aes67_session_handle_t s_session = NULL;
 static bool s_sink_added = false;
 
+/* Word length for the Ethernet RTP hook (set from SDP when sink added) */
+extern uint8_t s_hook_word_length;
+
 /* SAP discovery callback: auto-subscribe to discovered remote sources */
 static void sap_discovery_cb(bool is_announce,
                               const aes67_sap_remote_source_t *source,
@@ -62,6 +65,12 @@ static void sap_discovery_cb(bool is_announce,
                                             source->sdp, &sink_id);
     if (err == ESP_OK) {
         s_sink_added = true;
+        /* Update Ethernet hook word length from the SDP */
+        aes67_sink_t sink;
+        if (aes67_session_get_sink(s_session, sink_id, &sink) == ESP_OK) {
+            s_hook_word_length = sink.rtp_config.word_length;
+            ESP_LOGI("main", "Hook word_length set to %u", s_hook_word_length);
+        }
         ESP_LOGI("main", "Sink added (id=%u) -- receiving \"%s\"",
                  sink_id, source->name);
     } else {
@@ -148,6 +157,7 @@ static int32_t *s_hook_tmp32 = NULL;
 static int16_t *s_hook_i16 = NULL;
 static uint32_t s_hook_pkt_count = 0;
 StreamBufferHandle_t s_hook_sbuf = NULL;  /* Global: shared with playback task */
+uint8_t s_hook_word_length = 3;          /* Default L24. Updated from SDP. */
 
 /* Called for EVERY Ethernet frame, before lwIP.
  * RTP multicast on port 5004: process + free. Everything else: forward to lwIP. */
@@ -210,18 +220,18 @@ static esp_err_t IRAM_ATTR eth_rtp_hook(esp_eth_handle_t eth_handle,
         payload_len = rtp_payload;  /* Trim to actual RTP payload */
     }
 
-    /* L24 stereo: 6 bytes per frame */
-    int frames = payload_len / 6;
+    /* Use word length from SDP (set when sink is added) */
+    int wl = s_hook_word_length;
+    int frame_bytes = 2 * wl;  /* stereo: 2 channels * wl bytes */
+    int frames = payload_len / frame_bytes;
     if (frames <= 0 || frames > 192) goto forward;
 
-    /* Convert L24 -> int32 (left-justified, ready for 24-bit I2S).
-     * Left channel only for mono output to ES8311 single speaker.
-     * Write int32 directly -- no 16-bit truncation. */
-    aes67_convert_from_net(payload, s_hook_tmp32, frames, 2, 3);
+    /* Convert to int32, left channel only for mono speaker */
+    aes67_convert_from_net(payload, s_hook_tmp32, frames, 2, wl);
     for (int i = 0; i < frames; i++) {
         int32_t left = s_hook_tmp32[i * 2];
-        s_hook_tmp32[i * 2]     = left;  /* L channel */
-        s_hook_tmp32[i * 2 + 1] = left;  /* R = L for mono */
+        s_hook_tmp32[i * 2]     = left;
+        s_hook_tmp32[i * 2 + 1] = left;
     }
 
     /* Write int32 stereo to stream buffer */

@@ -34,7 +34,7 @@ static const char *TAG = "aes67_sap";
 #define SAP_MAX_LOCAL         8
 #define SAP_MAX_REMOTE        16
 
-#define SAP_RX_TASK_STACK     6144
+#define SAP_RX_TASK_STACK     12288  /* Needs room for callback -> add_source -> SDP log */
 #define SAP_TX_TASK_STACK     4096
 #define SAP_RX_TASK_PRIO      5   /* Background - discovery */
 #define SAP_TX_TASK_PRIO      4   /* Background - periodic announce */

@@ -39,6 +39,7 @@
 #include "driver/i2c.h"
 #include "freertos/stream_buffer.h"
 #include "esp_cache.h"
+#include "esp_ldo_regulator.h"
 #include "driver/i2s_std.h"
 #include "es8311.h"
 
@@ -528,6 +529,19 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    /* Configure LDO4 to 3.3V for SDIO/SPI power domain.
+     * Must be done early before any peripherals on this rail. */
+    esp_ldo_channel_handle_t ldo4 = NULL;
+    esp_ldo_channel_config_t ldo_cfg = {
+        .chan_id = 4,
+        .voltage_mv = 3300,
+    };
+    if (esp_ldo_acquire_channel(&ldo_cfg, &ldo4) == ESP_OK) {
+        ESP_LOGI(TAG, "LDO4 set to 3.3V");
+    } else {
+        ESP_LOGW(TAG, "LDO4 config failed (may already be set)");
+    }
 
     /* Create the default event loop used by Ethernet and AES67 events */
     ESP_ERROR_CHECK(esp_event_loop_create_default());

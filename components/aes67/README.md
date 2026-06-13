@@ -50,7 +50,7 @@ low-latency option.
 ## Quick start
 
 ```bash
-idf.py add-dependency "datanoisetv/aes67^0.1.0"
+idf.py add-dependency "datanoisetv/aes67^2.6.0"
 ```
 
 ```c

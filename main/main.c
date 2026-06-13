@@ -602,6 +602,9 @@ void app_main(void)
         aes67_audio_handle_t audio = NULL;
         aes67_node_get_audio(node, &audio);
         aes67_audio_set_isr_stream_buf(audio, s_hook_sbuf);
+        /* Also register it as the node's playout source for the (non-ISR)
+         * playback-task fallback path. */
+        aes67_node_set_playout_buf(node, s_hook_sbuf);
         /* Enable I2S RX capture for source (TX) streams */
         aes67_audio_init_capture(audio);
         s_hook_tx_chan = aes67_audio_get_tx_chan(audio);

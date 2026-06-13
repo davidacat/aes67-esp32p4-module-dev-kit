@@ -9,6 +9,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/stream_buffer.h"
 #include "aes67_config.h"
 #include "aes67_session.h"
 
@@ -103,6 +105,21 @@ esp_err_t aes67_node_get_ptp(aes67_node_handle_t handle,
 #include "aes67_rtp.h"
 esp_err_t aes67_node_get_rtp(aes67_node_handle_t handle,
                               aes67_rtp_engine_handle_t *rtp);
+
+/**
+ * Provide an external playout stream buffer for the node's playback task.
+ *
+ * By default the playback task consumes audio from the RTP engine's own
+ * stream buffer. An integration that intercepts RTP frames earlier (for
+ * example, an esp_eth Rx hook that parses audio in the driver callback and
+ * feeds it in directly) can register its own buffer here; when set and
+ * non-NULL, the playback task reads from it instead. Pass NULL to clear.
+ *
+ * Optional. Call before aes67_node_start(); has no effect on the ISR-driven
+ * I2S path, which is fed via aes67_audio_slot_write().
+ */
+esp_err_t aes67_node_set_playout_buf(aes67_node_handle_t handle,
+                                      StreamBufferHandle_t sbuf);
 
 #ifdef __cplusplus
 }

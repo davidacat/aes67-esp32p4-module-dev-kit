@@ -48,6 +48,7 @@ struct aes67_node {
     aes67_audio_handle_t        audio;
     aes67_session_handle_t      session;
     TaskHandle_t                tx_task;
+    StreamBufferHandle_t        external_playout_buf;  /* optional, see aes67_node_set_playout_buf */
     bool                        running;
 };
 
@@ -199,9 +200,10 @@ static void playback_task(void *arg)
             }
         }
 
-        /* Get the stream buffer (external hook or RTP engine's) */
-        extern StreamBufferHandle_t s_hook_sbuf;
-        StreamBufferHandle_t sbuf = s_hook_sbuf ? s_hook_sbuf :
+        /* Get the stream buffer: the optional external feed (e.g. an Rx-hook
+         * integration) if one was registered, otherwise the RTP engine's. */
+        StreamBufferHandle_t sbuf = node->external_playout_buf ?
+                                     node->external_playout_buf :
                                      aes67_rtp_engine_get_stream_buf(node->rtp);
         if (!sbuf) {
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -640,5 +642,16 @@ esp_err_t aes67_node_get_rtp(aes67_node_handle_t handle,
     }
 
     *rtp = handle->rtp;
+    return ESP_OK;
+}
+
+esp_err_t aes67_node_set_playout_buf(aes67_node_handle_t handle,
+                                      StreamBufferHandle_t sbuf)
+{
+    if (!handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    handle->external_playout_buf = sbuf;
     return ESP_OK;
 }

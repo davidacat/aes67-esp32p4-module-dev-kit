@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * PTP (IEEE 1588) clock synchronization interface.
  *
  * Wraps ESP-IDF's PTP daemon and hardware timestamping on ESP32-P4 EMAC.

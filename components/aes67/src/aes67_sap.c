@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * SAP (Session Announcement Protocol) - RFC 2974
  *
  * Handles periodic multicast announcement and discovery of AES67

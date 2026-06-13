@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * AES67 example application for ESP32-P4-NANO.
  *
  * Hardware configuration:

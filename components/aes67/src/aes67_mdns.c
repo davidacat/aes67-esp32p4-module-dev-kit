@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * mDNS service advertisement for AES67/RAVENNA.
  *
  * Advertises this node as an AES67 device using DNS-SD/mDNS,

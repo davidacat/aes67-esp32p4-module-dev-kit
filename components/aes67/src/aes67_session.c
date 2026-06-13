@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * AES67 session manager implementation.
  *
  * Manages the lifecycle of source and sink streams, including SDP

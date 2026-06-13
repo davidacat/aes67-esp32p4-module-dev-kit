@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * Network utilities for AES67.
  *
  * Multicast socket management, IGMP, and IP helpers using lwIP on ESP-IDF.

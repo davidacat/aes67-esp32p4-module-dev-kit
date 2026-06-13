@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * AES67/RAVENNA audio-over-IP component for ESP-IDF
  *
  * Top-level API for initialization, configuration and lifecycle management.

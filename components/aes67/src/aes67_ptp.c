@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * PTP (IEEE 1588) clock synchronization implementation.
  *
  * Wraps the ptpd daemon and ESP32-P4 hardware timestamping to provide

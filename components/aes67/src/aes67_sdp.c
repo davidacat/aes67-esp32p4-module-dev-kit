@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * SDP (Session Description Protocol) parser and generator for AES67.
  *
  * Generates and parses SDP documents conforming to AES67 / RAVENNA

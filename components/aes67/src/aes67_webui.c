@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * AES67 Web UI - HTTP server and WebSocket backend.
  *
  * Provides a REST API for device status and stream management,

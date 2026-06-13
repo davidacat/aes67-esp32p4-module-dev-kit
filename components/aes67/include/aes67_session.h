@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * Session manager for AES67 source and sink streams.
  *
  * Orchestrates stream lifecycle: creating/removing sources and sinks,

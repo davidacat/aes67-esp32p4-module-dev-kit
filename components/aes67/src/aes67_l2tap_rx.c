@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * L2 TAP based RTP receiver.
  *
  * Reads raw Ethernet frames from the L2 TAP interface, parses

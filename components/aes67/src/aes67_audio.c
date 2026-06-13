@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * I2S audio driver for AES67 on ESP32-P4.
  *
  * Uses ESP-IDF I2S standard mode with DMA for audio capture and playback.

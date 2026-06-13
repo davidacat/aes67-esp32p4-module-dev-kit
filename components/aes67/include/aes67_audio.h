@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * Audio I/O driver using I2S TDM on ESP32-P4.
  *
  * Manages I2S DMA transfers for audio capture and playback. Provides

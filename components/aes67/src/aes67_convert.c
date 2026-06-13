@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * Audio sample format conversion routines.
  *
  * Based on RAVENNA MTConvert. All conversions operate on interleaved

@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * AES67 configuration structures.
  *
  * Kconfig provides compile-time defaults; these structs allow runtime

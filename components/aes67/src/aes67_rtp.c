@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * RTP audio streaming engine implementation.
  *
  * Manages source (TX) and sink (RX) streams with per-stream ring buffers.

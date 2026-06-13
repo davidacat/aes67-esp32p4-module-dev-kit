@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * L2 TAP based RTP receiver for AES67.
  *
  * Bypasses the lwIP stack entirely by reading raw Ethernet frames via

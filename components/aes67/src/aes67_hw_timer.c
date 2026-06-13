@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * Hardware PTP-synchronized audio frame timer.
  *
  * Uses the ESP32-P4 EMAC's target time interrupt to fire a callback

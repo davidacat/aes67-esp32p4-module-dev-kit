@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * AES67 Web UI - HTTP server and WebSocket backend.
  *
  * Serves an embedded SPA, exposes REST endpoints for device status

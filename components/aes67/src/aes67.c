@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 DatanoiseTV
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/*
  * AES67/RAVENNA node lifecycle management.
  *
  * Coordinates initialization, startup and teardown of all AES67

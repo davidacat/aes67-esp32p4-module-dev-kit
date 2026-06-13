@@ -10,3 +10,6 @@ CLAUDE.md
 *.pyc
 __pycache__/
 aes67-linux-daemon/
+
+# Component registry pack output
+dist/

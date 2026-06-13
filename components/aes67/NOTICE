@@ -1,0 +1,20 @@
+aes67 (datanoisetv/aes67)
+Copyright 2026 DatanoiseTV
+
+This product bundles third-party code under the Apache License 2.0, kept in
+third_party/ with original SPDX headers and provenance intact:
+
+  third_party/ptpd/
+    A minimal IEEE-1588 PTP daemon derived from Apache NuttX
+    (apps/netutils/ptpd), ported to ESP-IDF.
+    Copyright 2020-2024 The Apache Software Foundation.
+    Portions Copyright 2024-2025 Espressif Systems (Shanghai) CO LTD.
+    Licensed under the Apache License, Version 2.0.
+
+  third_party/esp_eth_time/
+    EMAC time-control wrapper from the ESP-IDF ethernet/ptp example.
+    Copyright Espressif Systems (Shanghai) CO LTD.
+    Licensed under the Apache License, Version 2.0.
+
+You may obtain a copy of the Apache License 2.0 at:
+  http://www.apache.org/licenses/LICENSE-2.0

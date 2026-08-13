@@ -110,7 +110,7 @@ static const char *TAG = "main";
 /* Event group bit set when the Ethernet interface obtains an IP */
 #define ETH_GOT_IP_BIT  BIT0
 
-/* ---- Pin definitions for ESP32-P4-NANO ---- */
+/* ---- Pin definitions for ESP32-P4-Module-DEV-KIT, same as ESP32-P4-NANO ---- */
 
 /* RMII Ethernet (directly wired, configured via emac_config) */
 #define ETH_MDC_GPIO        31
@@ -121,23 +121,22 @@ static const char *TAG = "main";
 
 /* I2S pin configuration.
  *
- * External I2S DAC (active):
+ * External I2S DAC (commented out):
  *   DOUT=GPIO32, LRCLK=GPIO33, BCLK=GPIO36, MCLK=GPIO13
  *
- * ESP32-P4-NANO onboard ES8311 (commented out):
+ * ESP32-P4-NANO onboard ES8311 (active):
  *   MCLK=13, SCLK=12, LRCK=10, DOUT=9, DIN=11
- */
-#define I2S_MCLK_GPIO       13
-#define I2S_SCLK_GPIO       36   /* BCLK -> external DAC */
-#define I2S_LRCK_GPIO       33   /* LRCLK -> external DAC */
-#define I2S_DOUT_GPIO       32   /* Data out -> external DAC */
-#define I2S_DIN_GPIO        21   /* Data in <- external ADC */
-/* Onboard ES8311 pins (restore for built-in codec):
- * #define I2S_SCLK_GPIO    12
- * #define I2S_LRCK_GPIO    10
- * #define I2S_DOUT_GPIO     9
- * #define I2S_DIN_GPIO     11
- */
+ 
+ * #define I2S_MCLK_GPIO       13
+ * #define I2S_SCLK_GPIO       36   BCLK -> external DAC
+ * #define I2S_LRCK_GPIO       33   LRCLK -> external DAC
+ * #define I2S_DOUT_GPIO       32   Data out -> external DAC
+ * #define I2S_DIN_GPIO        21   Data in <- external ADC
+/* Onboard ES8311 pins */
+#define I2S_SCLK_GPIO    12
+#define I2S_LRCK_GPIO    10
+#define I2S_DOUT_GPIO     9
+#define I2S_DIN_GPIO     11
 
 /* Power amplifier enable (active high) */
 #define PA_CTRL_GPIO        53
